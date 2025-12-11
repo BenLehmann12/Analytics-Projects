@@ -91,3 +91,25 @@ recent_trends <- metro_trends %>%
   filter(Date == max(Date)) %>%
   select(Region.Name, Unemployment_Rate, Rate_Change, Pct_Change, Trend) %>%
   arrange(desc(abs(Rate_Change)))
+
+#Add Regression
+metro_regression <- metro_long %>%
+  group_by(Region.Name, Region.Code) %>%
+  filter(n() >= 5) %>%  # Need at least 5 observations
+  do({
+    model <- lm(Unemployment_Rate ~ as.numeric(Date), data = .)
+    data.frame(
+      Slope = coef(model)[2],
+      P_Value = summary(model)$coefficients[2, 4],
+      R_Squared = summary(model)$r.squared
+    )
+  }) %>%
+  ungroup() %>%
+  mutate(
+    Significant_Trend = ifelse(P_Value < 0.05, "Yes", "No"),
+    Trend_Direction = case_when(
+      Slope > 0 & Significant_Trend == "Yes" ~ "Increasing",
+      Slope < 0 & Significant_Trend == "Yes" ~ "Decreasing",
+      TRUE ~ "No Significant Trend"
+    )
+  )

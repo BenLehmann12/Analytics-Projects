@@ -71,3 +71,23 @@ state_summary <- metro_summary %>%
     .groups = "drop"
   ) %>%
   arrange(desc(Avg_Unemployment))
+
+#Trend Analysis
+metro_trends <- metro_long %>%
+  arrange(Region.Name, Date) %>%
+  group_by(Region.Name) %>%
+  mutate(
+    Rate_Change = Unemployment_Rate - lag(Unemployment_Rate),
+    Pct_Change = (Rate_Change / lag(Unemployment_Rate)) * 100,
+    Trend = case_when(
+      Rate_Change > 0.1 ~ "Increasing",
+      Rate_Change < -0.1 ~ "Decreasing",
+      TRUE ~ "Stable"
+    )
+  ) %>%
+  ungroup()
+
+recent_trends <- metro_trends %>%
+  filter(Date == max(Date)) %>%
+  select(Region.Name, Unemployment_Rate, Rate_Change, Pct_Change, Trend) %>%
+  arrange(desc(abs(Rate_Change)))

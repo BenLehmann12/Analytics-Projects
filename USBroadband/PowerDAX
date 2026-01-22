@@ -16,3 +16,9 @@ CALCULATE(
     DISTINCTCOUNT('bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)'[geography_id]),
     'bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)'[mobilebb_5g_spd1_area_st_pct] > 0.5
 )
+
+4G Gap = [mobilebb_4g_area_st_pct] - [mobilebb_4g_area_iv_pct]
+
+5G Speed1 Gap = [mobilebb_5g_spd1_area_st_pct] - [mobilebb_5g_spd1_area_iv_pct]
+
+Avg Total Gap = AVERAGE('bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)'[4G Gap]) + AVERAGE('bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)'[5G Speed1 Gap])

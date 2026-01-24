@@ -1,0 +1,9 @@
+I am working on a Dashboard working with Mobile Broadband Around the United States
+My dashboard will Answer Questions that I have been pondering on:
+1. Which states have the best/worst 5G coverage?
+2. What's the gap between street-level and infrastructure coverage?
+3. How does state area correlate with coverage?
+4. Which territories lag behind states?
+5. What's the progression from 3G to 4G to 5G?  
+
+I am working on a Dashboard in Power BI and using Python along with Plotly and other interactive packages. Work in Progress.

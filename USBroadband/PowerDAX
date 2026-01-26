@@ -105,3 +105,38 @@ IF(
     "Yes",
     "No"
 )
+
+
+4G-5G SP1 Correlation = 
+VAR Avg4G = AVERAGE('bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)'[mobilebb_4g_area_st_pct])
+VAR Avg5GSp1 = [5G Mean]
+VAR Numerator = 
+    SUMX(
+        'bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)',
+        ('bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)'[mobilebb_4g_area_st_pct] - Avg4G) *
+        ('bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)'[mobilebb_5g_spd1_area_st_pct] - Avg5GSp1)
+    )
+VAR Denominator4G = 
+    SUMX('bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)', POWER('bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)'[mobilebb_4g_area_st_pct] - Avg4G, 2))
+VAR Denominator5GSp1 = 
+    SUMX('bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)', POWER('bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)'[mobilebb_5g_spd1_area_st_pct] - Avg5GSp1, 2))
+RETURN
+DIVIDE(Numerator, SQRT(Denominator4G * Denominator5GSp1), 0)
+
+4G-5G SP2 Correlation = 
+VAR Avg4G = AVERAGE('bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)'[mobilebb_4g_area_st_pct])
+VAR Avg5GSp2 = [5G Speed 2 Mean]
+VAR Numerator = 
+    SUMX(
+        'bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)',
+        ('bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)'[mobilebb_4g_area_st_pct] - Avg4G) *
+        ('bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)'[mobilebb_5g_spd2_area_st_pct] - Avg5GSp2)
+    )
+VAR Denominator4G = 
+    SUMX('bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)', POWER('bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)'[mobilebb_4g_area_st_pct] - Avg4G, 2))
+VAR Denominator5GSp2 = 
+    SUMX('bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)', POWER('bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)'[mobilebb_5g_spd2_area_st_pct] - Avg5GSp2, 2))
+RETURN
+DIVIDE(Numerator, SQRT(Denominator4G * Denominator5GSp2), 0)
+
+5G Coefficient of Variation = DIVIDE([5G Standard Deviation], [5G Mean], 0)

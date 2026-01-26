@@ -140,3 +140,87 @@ RETURN
 DIVIDE(Numerator, SQRT(Denominator4G * Denominator5GSp2), 0)
 
 5G Coefficient of Variation = DIVIDE([5G Standard Deviation], [5G Mean], 0)
+
+Area-Coverage Relationship = 
+VAR AvgArea = AVERAGE('bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)'[total_area])
+VAR AvgCoverage = [Avg 5G Speed1 Coverage]
+VAR Numerator = 
+    SUMX(
+        'bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)',
+        ('bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)'[total_area] - AvgArea) *
+        ('bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)'[mobilebb_5g_spd1_area_st_pct] - AvgCoverage)
+    )
+VAR DenominatorArea = 
+    SUMX('bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)', POWER('bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)'[total_area] - AvgArea, 2))
+VAR DenominatorCoverage = 
+    SUMX('bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)', POWER('bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)'[mobilebb_5g_spd1_area_st_pct] - AvgCoverage, 2))
+RETURN
+DIVIDE(Numerator, SQRT(DenominatorArea * DenominatorCoverage), 0)
+
+Area-Coverage Speed1 Correlation = 
+VAR AvgSp1Area = AVERAGE('bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)'[total_area])
+VAR AvgSp1Coverage = [5G Mean]
+VAR NumeratorSp1 = 
+    SUMX(
+        'bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)',
+        ('bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)'[total_area] - AvgSp1Area) *
+        ('bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)'[mobilebb_5g_spd1_area_st_pct] - AvgSp1Coverage)
+    )
+VAR DenominatorSp1Area = 
+    SUMX('bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)', POWER('bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)'[total_area] - AvgSp1Area, 2))
+VAR DenominatorSp1Coverage = 
+    SUMX('bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)', POWER('bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)'[mobilebb_5g_spd1_area_st_pct] - AvgSp1Coverage, 2))
+RETURN
+DIVIDE(NumeratorSp1, SQRT(DenominatorSp1Area * DenominatorSp1Coverage), 0)
+
+Area-Coverage Speed2 Correlation = 
+VAR AvgSp2Area = AVERAGE('bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)'[total_area])
+VAR AvgSp2Coverage = [5G Speed 2 Mean]
+VAR NumeratorSp2 = 
+    SUMX(
+        'bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)',
+        ('bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)'[total_area] - AvgSp2Area) *
+        ('bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)'[mobilebb_5g_spd2_area_st_pct] - AvgSp2Coverage)
+    )
+VAR DenominatorSp2Area = 
+    SUMX('bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)', POWER('bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)'[total_area] - AvgSp2Area, 2))
+VAR DenominatorSp2Coverage = 
+    SUMX('bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)', POWER('bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)'[mobilebb_5g_spd1_area_st_pct] - AvgSp2Coverage, 2))
+RETURN
+DIVIDE(NumeratorSp2, SQRT(DenominatorSp2Area * DenominatorSp2Coverage), 0)
+
+Avg Coverage by Size = 
+CALCULATE(
+    [Avg 5G Speed1 Coverage],
+    ALLEXCEPT('bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)', 'bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)'[State Size Category])
+)
+
+Gap Severity = 
+SWITCH(
+    TRUE(),
+    [5G Speed1 Gap] > 0.20, "High Gap",
+    [5G Speed1 Gap] > 0.10, "Moderate Gap",
+    [5G Speed1 Gap] > 0.05, "Low Gap",
+    "Minimal Gap"
+)
+
+State Size Category = 
+SWITCH(
+    TRUE(),
+    'bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)'[total_area] > 200000, "Very Large (>200K)",
+    'bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)'[total_area] > 100000, "Large (100-200K)",
+    'bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)'[total_area] > 50000, "Medium (50-100K)",
+    'bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)'[total_area] > 10000, "Small (10-50K)",
+    "Very Small (<10K)"
+)
+
+5G Speed 2 Coverage Distribution = 
+VAR CV = [5G Speed 2 Coefficient of Variation]
+RETURN
+SWITCH(
+    TRUE(),
+    CV < 0.15, "Very Consistent",
+    CV < 0.30, "Moderately Consistent",
+    CV < 0.50, "Variable",
+    "Highly Variable"
+)

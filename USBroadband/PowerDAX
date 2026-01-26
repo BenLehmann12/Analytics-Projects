@@ -224,3 +224,13 @@ SWITCH(
     CV < 0.50, "Variable",
     "Highly Variable"
 )
+
+5G SP2 Z-Score = 
+VAR State2Mean = CALCULATE([5G Speed 2 Mean], ALL('bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)'))
+VAR StateStd2Dev = CALCULATE([5G Speed 2 Standard Deviation], ALL('bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)'))
+RETURN
+DIVIDE(
+    'bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)'[mobilebb_5g_spd2_area_st_pct] - State2Mean,
+    StateStd2Dev,
+    0
+)

@@ -234,3 +234,21 @@ DIVIDE(
     StateStd2Dev,
     0
 )
+
+Outlier Status SP1 = 
+SWITCH(
+    TRUE(),
+    ABS('bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)'[5G SP1 Z-Score]) > 2.5, "Extreme Outlier",
+    ABS('bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)'[5G SP1 Z-Score]) > 2.0, "Moderate Outlier",
+    ABS('bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)'[5G SP1 Z-Score]) > 1.5, "Mild Outlier",
+    "Normal"
+)
+
+Outlier Status SP2 = 
+SWITCH(
+    TRUE(),
+    ABS('bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)'[5G SP2 Z-Score]) > 2.5, "Extreme Outlier",
+    ABS('bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)'[5G SP2 Z-Score]) > 2.0, "Moderate Outlier",
+    ABS('bdc_us_mobile_broadband_summary_by_geography_J25_30dec2025 (2)'[5G SP2 Z-Score]) > 1.5, "Mild Outlier",
+    "Normal"
+)

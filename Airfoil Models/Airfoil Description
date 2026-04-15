@@ -1,1 +1,14 @@
+This project has taken over a couple Months to work on but I am finally getting my files done.
 
+The Questions that I am going to solve is 
+1. How effectively does the PGA space (Principal Geodesic Analysis) reduce the dimensionality of the airfoil design space compared to PCA (Principal Component Analysis) when applied directly to the 18 CST coefficients?
+
+But in Modeling I am going to try:
+1.Developing a neural network to predict aerodynamic coefficients (\(C_l, C_d, C_m\)) directly from the PGA space coefficients, bypassing expensive CFD simulations.
+2.Train a Variational Autoencoder (VAE) using the curated_airfoils data to generate physically plausible airfoils.
+
+In Analytical Side:
+1. Analyze the impact of trailing edge thickness on the aerodynamic efficiency of airfoils in the dataset. 
+
+Finding the Optimal Blade Selection:
+1. Use the PGA space to find the optimal airfoil shape for a specific wind turbine turbine capacity (e.g., NREL 5MW) that maximizes lift-to-drag ratio under fluctuating inflow speeds.

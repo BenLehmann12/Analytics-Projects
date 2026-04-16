@@ -12,3 +12,9 @@ In Analytical Side:
 
 Finding the Optimal Blade Selection:
 1. Use the PGA space to find the optimal airfoil shape for a specific wind turbine turbine capacity (e.g., NREL 5MW) that maximizes lift-to-drag ratio under fluctuating inflow speeds.
+
+ML/DL Models Used
+- Random Forest
+- Neural Networks
+- Physics Informed Neural Network
+- Variational Autoencoder 

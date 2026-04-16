@@ -30,3 +30,5 @@ Generated candidate solutions under varying constraints
 
 
 Tools Used: Python, PyTorch, NumPy, Pandas, Scikit-learn, Matplotlib
+
+<img width="1679" height="1082" alt="image" src="https://github.com/user-attachments/assets/cb0e7f23-ce5c-4472-99da-7990d02c895c" />

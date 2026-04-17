@@ -15,6 +15,7 @@ Compared against PCA and demonstrated improved representation of complex relatio
 3. Surrogate Modeling
 Built a PyTorch neural network to predict target variables (𝐶𝑙,𝐶𝑑,𝐶𝑚)
 Achieved ~95% accuracy on validation data
+- Models include PINN, BINN, Regular NN
 
 5. Generative Modeling
 Trained a Variational Autoencoder (VAE) on 19k+ samples

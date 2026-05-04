@@ -151,3 +151,5 @@ Skills Demonstrated:
  - Dimensionality Reduction
  - Model Evaluation
  - Data Preprocessing
+
+<img width="2100" height="824" alt="image" src="https://github.com/user-attachments/assets/78669308-ac92-4bb5-8f20-9ab4c096717f" />

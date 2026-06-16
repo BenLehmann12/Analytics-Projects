@@ -1,1 +1,255 @@
+Regional and Industry GDP Analytics: Statistical Testing, Forecasting, and Economic Segmentation
+Overview
 
+This project analyzes quarterly Gross Domestic Product (GDP) data across U.S. regions and industries to identify economic growth patterns, evaluate regional differences, forecast future GDP, and uncover economic similarities through statistical analysis and machine learning.
+
+Using GDP by industry and region data from the United States, this project combines econometrics, statistical inference, machine learning, time-series forecasting, clustering, and interactive visualizations into a comprehensive economic analytics pipeline.
+
+Objectives
+
+This project aims to answer several key economic questions:
+
+Which industries contribute the most to U.S. economic output?
+Which regions exhibit the strongest economic growth?
+Are regional growth differences statistically significant?
+Which industries consistently outperform the national economy?
+Can regions be grouped into distinct economic profiles?
+Which industries move together over time?
+Can future GDP be accurately forecast using statistical and machine learning models?
+Which forecasting approach performs best?
+Dataset
+
+The dataset contains quarterly GDP values (in current dollars) for:
+
+Multiple U.S. regions
+Multiple industries
+Quarterly observations over multiple years
+Features
+Variable	Description
+GeoFIPS	Regional identifier
+Region	U.S. Economic Region
+IndustryID	BEA Industry Code
+Industry	Industry Name
+Quarterly GDP Columns	GDP values by quarter
+
+The data is transformed into a long-format time-series structure for analysis.
+
+Methodology
+1. Data Preparation
+
+The raw dataset is cleaned and reshaped into a time-series format.
+
+Feature engineering includes:
+
+Quarterly GDP Growth Rates
+Lag Variables
+Rolling Averages
+Rolling Standard Deviations
+Year-over-Year Growth
+Industry and Region Encodings
+Exploratory Data Analysis (EDA)
+GDP Trend Analysis
+
+Visualizations include:
+
+Total U.S. GDP over time
+Regional GDP trends
+Industry GDP rankings
+Industry share of GDP
+Growth rate distributions
+Example Insights
+Identify the fastest-growing regions
+Determine dominant industries within each region
+Evaluate economic volatility across sectors
+Statistical Analysis
+Analysis of Variance (ANOVA)
+
+Tests whether GDP growth differs significantly across regions and industries.
+
+Null Hypothesis
+H0:μ1=μ2=⋯=μk
+	​
+Alternative Hypothesis
+At least one group mean differs.
+
+Assumption Testing
+
+Prior to ANOVA:
+
+Shapiro-Wilk Test (Normality)
+Levene's Test (Equal Variance)
+
+When assumptions are violated:
+
+Kruskal-Wallis Test
+Multiple Hypothesis Testing
+
+Pairwise regional comparisons are performed using:
+
+Welch's t-tests
+Bonferroni Correction
+Benjamini-Hochberg False Discovery Rate (FDR)
+
+This identifies specific regions with statistically significant differences in growth.
+
+Effect Size Analysis
+
+Beyond statistical significance:
+
+Cohen's d
+Eta Squared (η²)
+
+Effect sizes quantify the practical importance of observed differences.
+
+Correlation Analysis
+
+Correlation matrices identify industries and regions with similar economic behavior.
+
+Analyses
+Regional GDP Correlations
+Industry GDP Correlations
+Visualizations
+Correlation Heatmaps
+Clustered Correlation Maps
+Principal Component Analysis (PCA)
+
+PCA reduces dimensionality and identifies the primary drivers of economic variation.
+
+Objectives
+Identify dominant economic structures
+Compare regional economic profiles
+Visualize similarities among regions
+Outputs
+Explained Variance Analysis
+PCA Loadings
+PC1 vs PC2 Scatterplots
+Clustering Analysis
+
+Regions are segmented using unsupervised learning techniques.
+
+Features Used
+Average GDP
+Growth Rate
+Volatility
+Trend Strength
+Algorithms
+K-Means Clustering
+
+Regions are grouped into economic clusters such as:
+
+High-Growth Economies
+Stable Mature Economies
+Volatile Economies
+Hierarchical Clustering
+
+Dendrograms reveal relationships among regional economies.
+
+Evaluation
+Elbow Method
+Silhouette Score
+Predictive Modeling
+
+Machine learning models are trained to predict future GDP values.
+
+Target Variable
+GDPt+1
+	​
+Features
+Region
+Industry
+Lagged GDP
+Rolling Statistics
+Growth Rates
+Quarter Indicators
+
+Models Evaluated
+Linear Models
+Linear Regression
+Ridge Regression
+Lasso Regression
+Tree-Based Models
+Random Forest Regressor
+Gradient Boosting Regressor
+XGBoost Regressor
+Evaluation Metrics
+RMSE
+MAE
+MAPE
+R²
+Time Series Forecasting
+
+GDP forecasts are generated for future quarters.
+
+Statistical Forecasting Models
+ARIMA
+Captures trend and autoregressive behavior.
+
+SARIMA
+Captures quarterly seasonality.
+
+Holt-Winters Exponential Smoothing
+Captures trend and seasonal effects.
+
+Prophet
+Flexible forecasting with trend decomposition.
+
+Visualizations
+
+This project includes extensive visual analytics:
+Economic Trends
+GDP Time Series
+Regional Growth Trends
+Industry Rankings
+Statistical Analysis
+Boxplots
+Violin Plots
+Tukey HSD Comparisons
+Correlation Analysis
+Correlation Heatmaps
+Cluster Maps
+Dimensionality Reduction
+PCA Scatterplots
+Loading Plots
+Clustering
+Cluster Visualizations
+Dendrograms
+Forecasting
+Actual vs Forecast
+Forecast Confidence Intervals
+Model Comparison Charts
+Feature Importance Rankings
+
+
+Technologies Used
+Programming
+Python
+Data Analysis
+Pandas
+NumPy
+Statistical Modeling
+SciPy
+Statsmodels
+Machine Learning
+Scikit-Learn
+XGBoost
+Time Series
+Statsmodels
+Prophet
+Visualization
+Matplotlib
+Seaborn
+Plotly
+
+Key Skills Demonstrated
+Statistical Inference
+Hypothesis Testing
+Multiple Comparison Procedures
+Time Series Analysis
+Econometric Forecasting
+Machine Learning
+Feature Engineering
+Clustering
+Principal Component Analysis
+Explainable AI
+Data Visualization
+Economic Analytics

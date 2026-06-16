@@ -1,7 +1,7 @@
 Regional and Industry GDP Analytics: Statistical Testing, Forecasting, and Economic Segmentation
 Overview
 
-This project analyzes quarterly Gross Domestic Product (GDP) data across U.S. regions and industries to identify economic growth patterns, evaluate regional differences, forecast future GDP, and uncover economic similarities through statistical analysis and machine learning.
+This project analyzes quarterly Gross Domestic Product (GDP) data across U.S. States and regions and industries to identify economic growth patterns, evaluate regional differences, forecast future GDP, and uncover economic similarities through statistical analysis and machine learning.
 
 Using GDP by industry and region data from the United States, this project combines econometrics, statistical inference, machine learning, time-series forecasting, clustering, and interactive visualizations into a comprehensive economic analytics pipeline.
 
@@ -10,8 +10,8 @@ Objectives
 This project aims to answer several key economic questions:
 
 Which industries contribute the most to U.S. economic output?
-Which regions exhibit the strongest economic growth?
-Are regional growth differences statistically significant?
+Which regions and States exhibit the strongest economic growth?
+Are regional and State growth differences statistically significant?
 Which industries consistently outperform the national economy?
 Can regions be grouped into distinct economic profiles?
 Which industries move together over time?
@@ -87,8 +87,6 @@ Multiple Hypothesis Testing
 Pairwise regional comparisons are performed using:
 
 Welch's t-tests
-Bonferroni Correction
-Benjamini-Hochberg False Discovery Rate (FDR)
 
 This identifies specific regions with statistically significant differences in growth.
 
@@ -97,7 +95,6 @@ Effect Size Analysis
 Beyond statistical significance:
 
 Cohen's d
-Eta Squared (η²)
 
 Effect sizes quantify the practical importance of observed differences.
 
@@ -107,6 +104,7 @@ Correlation matrices identify industries and regions with similar economic behav
 
 Analyses
 Regional GDP Correlations
+State GDP Correlations
 Industry GDP Correlations
 Visualizations
 Correlation Heatmaps

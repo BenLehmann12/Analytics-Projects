@@ -71,3 +71,10 @@ Findings
 10. Iowa County Map
 - Choropleth of all 99 counties by taxable sales, animated by year, built from county FIPS codes matched to US Census county boundaries
 Log-scaled snapshot of the latest year to surface variation among rural counties otherwise dwarfed by urban totalsbehave distinctly.
+
+🛠️ Tech Stack
+Data wrangling: Python, SQL before CSV file, pandas, numpy
+Statistics: scipy.stats, statsmodels, A/B Testing
+Machine learning: scikit-learn, xgboost, KNN, Regression (L1,L2,Linear), Random Forests, Decision Trees, Gradient Boosting
+Visualization: matplotlib, seaborn, plotly
+Geospatial: GeoJSON county boundaries (US Census, via Plotly's public dataset)

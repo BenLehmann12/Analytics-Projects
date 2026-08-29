@@ -1,0 +1,269 @@
+---
+title: "ConcussionAnalysis"
+author: "Ben Lehmann"
+date: "2026-08-29"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                       fig.width = 8, fig.height = 5, fig.align = "center")
+```
+
+
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(scales)
+library(viridis)
+library(corrplot)
+library(reshape2)
+library(gridExtra)
+library(patchwork)
+library(car)
+library(broom)
+library(pROC)
+library(caret)
+library(randomForest)
+library(rpart)
+library(nnet)
+library(MASS)
+library(glmnet)
+library(cluster)
+library(factoextra)
+library(pwr)
+library(knitr)
+
+theme_set(
+  theme_minimal(base_size = 12) +
+    theme(
+      plot.title = element_text(face = "bold", size = 13),
+      plot.subtitle = element_text(color = "grey30"),
+      panel.grid.minor = element_blank(),
+      strip.text = element_text(face = "bold")
+    )
+)
+
+pal <- c("#1b9e77", "#d95f02", "#7570b3", "#e7298a", "#66a61e",
+         "#e6ab02", "#a6761d", "#666666", "#377eb8")
+
+set.seed(42)
+```
+
+
+
+
+```{r}
+df <- read.csv("athlete_concussion_enriched_30k.csv", stringsAsFactors = FALSE)
+
+df <- df %>%
+  mutate(
+    injury_date = as.Date(injury_date, format = "%m/%d/%Y"),
+    return_to_play_date = as.Date(return_to_play_date, format = "%m/%d/%Y"),
+    sex = factor(sex, levels = c("F", "M")),
+    team_level = factor(team_level, levels = c("Youth/High School", "Collegiate", "Elite/Pro")),
+    sport = factor(sport),
+    season = factor(season, levels = c("Spring","Summer","Fall","Winter")),
+    injury_setting = factor(injury_setting),
+    concussion_mechanism = factor(concussion_mechanism),
+    loss_of_consciousness = factor(loss_of_consciousness, levels = c("No","Yes")),
+    amnesia_present = factor(amnesia_present, levels = c("No","Yes")),
+    imaging_ordered = factor(imaging_ordered, levels = c("No","Yes")),
+    prolonged_rtp_f = factor(prolonged_rtp, levels = c(0,1), labels = c("Normal RTP","Prolonged RTP")),
+    high_contact_f = factor(high_contact, levels = c(0,1), labels = c("Lower-Contact","High-Contact")),
+    pct_of_baseline = round(scat5_acute / baseline_scat5 * 100, 1)
+  )
+
+n_athletes <- n_distinct(df$athlete_id)
+kable(data.frame(
+  Metric = c("Total concussion events", "Unique athletes", "Sports represented",
+             "Training centers", "Date range"),
+  Value = c(format(nrow(df), big.mark=","), format(n_athletes, big.mark=","),
+            n_distinct(df$sport), n_distinct(df$training_center),
+            paste(min(df$injury_date, na.rm=TRUE), "to", max(df$injury_date, na.rm=TRUE)))
+), caption = "Dataset Overview")
+```
+
+
+
+
+# Building the SCAT5 Severity Scale
+
+Rather than use arbitrary cut points on the raw `scat5_acute` score, we anchor severity to **each athlete's own healthy baseline** by computing:
+
+$$\text{Percent of Baseline} = \frac{\text{scat5\_acute}}{\text{baseline\_scat5}} \times 100$$
+
+
+```{r}
+df <- df %>%
+  mutate(
+    severity_scale_3 = case_when(
+      pct_of_baseline < 35 ~ "Severe",
+      pct_of_baseline < 55 ~ "Medium",
+      TRUE ~ "Low"
+    ),
+    severity_scale_3 = factor(severity_scale_3, levels = c("Low","Medium","Severe"), ordered = TRUE),
+
+    severity_scale_5 = case_when(
+      pct_of_baseline < 25 ~ "Very Severe",
+      pct_of_baseline < 35 ~ "Severe",
+      pct_of_baseline < 45 ~ "Moderate",
+      pct_of_baseline < 55 ~ "Mild",
+      TRUE ~ "Minimal"
+    ),
+    severity_scale_5 = factor(severity_scale_5,
+                               levels = c("Minimal","Mild","Moderate","Severe","Very Severe"),
+                               ordered = TRUE)
+  )
+
+kable(df %>% count(severity_scale_3) %>% mutate(pct = percent(n/sum(n))),
+      caption = "3-Level SCAT5 Severity Scale (Low = mildest injury, Severe = worst)")
+kable(df %>% count(severity_scale_5) %>% mutate(pct = percent(n/sum(n))),
+      caption = "5-Level SCAT5 Severity Scale")
+```
+
+
+
+
+```{r}
+p1 <- ggplot(df, aes(x = pct_of_baseline, fill = severity_scale_3)) +
+  geom_histogram(binwidth = 2, color = "white", alpha = 0.9) +
+  geom_vline(xintercept = c(35, 55), linetype = "dashed", color = "grey30") +
+  scale_fill_manual(values = c("Low" = "#1b9e77", "Medium" = "#e6ab02", "Severe" = "#d95f02")) +
+  labs(title = "Distribution of Acute SCAT5 as % of Individual Baseline",
+       subtitle = "Dashed lines mark the Low/Medium/Severe cut points",
+       x = "Percent of Baseline SCAT5 Score", y = "Count", fill = "Severity") +
+  theme(legend.position = "top")
+
+p2 <- ggplot(df, aes(x = severity_scale_3, y = days_to_rtp, fill = severity_scale_3)) +
+  geom_boxplot(alpha = 0.85, outlier.alpha = 0.3) +
+  scale_fill_manual(values = c("Low" = "#1b9e77", "Medium" = "#e6ab02", "Severe" = "#d95f02")) +
+  labs(title = "Days to Return-to-Play by Severity Scale",
+       x = "SCAT5 Severity", y = "Days to RTP") +
+  theme(legend.position = "none")
+
+p3 <- ggplot(df, aes(x = severity_scale_5, y = scat5_acute, fill = severity_scale_5)) +
+  geom_boxplot(alpha = 0.85, outlier.alpha = 0.3) +
+  scale_fill_viridis_d(option = "plasma") +
+  labs(title = "Raw Acute SCAT5 Score by 5-Level Scale",
+       x = "Severity (5-level)", y = "Acute SCAT5 Score") +
+  theme(legend.position = "none", axis.text.x = element_text(angle = 20, hjust = 1))
+
+p4 <- df %>%
+  count(severity_scale_3, prolonged_rtp_f) %>%
+  group_by(severity_scale_3) %>%
+  mutate(pct = n/sum(n)) %>%
+  ggplot(aes(x = severity_scale_3, y = pct, fill = prolonged_rtp_f)) +
+  geom_col(position = "stack", alpha = 0.9) +
+  scale_y_continuous(labels = percent) +
+  scale_fill_manual(values = c("Normal RTP" = "#377eb8", "Prolonged RTP" = "#d95f02")) +
+  labs(title = "Prolonged RTP Rate by Severity Scale", x = "SCAT5 Severity",
+       y = "Proportion of Cases", fill = NULL) +
+  theme(legend.position = "top")
+
+(p1 + p2) / (p3 + p4)
+```
+
+
+
+#EDA
+
+```{r}
+p1 <- ggplot(df, aes(x = days_to_rtp)) +
+  geom_histogram(binwidth = 1, fill = "#377eb8", color = "white", alpha = 0.9) +
+  labs(title = "Days to Return-to-Play", x = "Days", y = "Count")
+
+p2 <- ggplot(df, aes(x = scat5_acute)) +
+  geom_histogram(binwidth = 2, fill = "#d95f02", color = "white", alpha = 0.9) +
+  labs(title = "Acute SCAT5 Score", x = "Score", y = "Count")
+
+p3 <- ggplot(df, aes(x = age_at_injury)) +
+  geom_histogram(binwidth = 1, fill = "#1b9e77", color = "white", alpha = 0.9) +
+  labs(title = "Age at Injury", x = "Age", y = "Count")
+
+p4 <- ggplot(df, aes(x = bmi)) +
+  geom_histogram(binwidth = 0.5, fill = "#7570b3", color = "white", alpha = 0.9) +
+  labs(title = "BMI", x = "BMI", y = "Count")
+
+(p1 + p2) / (p3 + p4)
+```
+
+
+
+
+
+```{r}
+p1 <- df %>%
+  mutate(sport = fct_reorder(sport, days_to_rtp, .fun = median)) %>%
+  ggplot(aes(x = sport, y = days_to_rtp, fill = sport)) +
+  geom_boxplot(alpha = 0.85, outlier.alpha = 0.25) +
+  scale_fill_viridis_d() +
+  coord_flip() +
+  labs(title = "Days to RTP by Sport", x = NULL, y = "Days to RTP") +
+  theme(legend.position = "none")
+
+p2 <- ggplot(df, aes(x = sex, y = scat5_acute, fill = sex)) +
+  geom_violin(alpha = 0.8) +
+  geom_boxplot(width = 0.15, fill = "white", outlier.alpha = 0.2) +
+  scale_fill_manual(values = c("F" = "#e7298a", "M" = "#377eb8")) +
+  labs(title = "Acute SCAT5 by Sex", x = "Sex", y = "Acute SCAT5") +
+  theme(legend.position = "none")
+
+p3 <- ggplot(df, aes(x = team_level, y = days_to_rtp, fill = team_level)) +
+  geom_boxplot(alpha = 0.85, outlier.alpha = 0.25) +
+  scale_fill_manual(values = c("Youth/High School" = "#66a61e", "Collegiate" = "#e6ab02", "Elite/Pro" = "#a6761d")) +
+  labs(title = "Days to RTP by Competition Level", x = NULL, y = "Days to RTP") +
+  theme(legend.position = "none")
+
+p4 <- df %>%
+  count(sport, severity_scale_3) %>%
+  group_by(sport) %>%
+  mutate(pct = n / sum(n)) %>%
+  ggplot(aes(x = fct_reorder(sport, pct * (severity_scale_3=="Severe")), y = pct, fill = severity_scale_3)) +
+  geom_col(position = "stack") +
+  coord_flip() +
+  scale_y_continuous(labels = percent) +
+  scale_fill_manual(values = c("Low" = "#1b9e77", "Medium" = "#e6ab02", "Severe" = "#d95f02")) +
+  labs(title = "Severity Mix by Sport", x = NULL, y = "Proportion", fill = "Severity") +
+  theme(legend.position = "bottom")
+
+(p1 + p2) / (p3 + p4)
+```
+
+
+
+
+
+```{r}
+num_vars <- df %>%
+  dplyr::select(days_to_rtp, scat5_acute, scat5_pre_rtp, scat5_improvement, baseline_scat5,
+                 pct_of_baseline, age_at_injury, total_games_played, total_elite_years,
+                 games_per_year, symptom_count_acute, headache_severity_0_10,
+                 sleep_hours_post_injury, bmi)
+
+cor_mat <- cor(num_vars, use = "pairwise.complete.obs")
+corrplot(cor_mat, method = "color", type = "upper", tl.col = "black", tl.srt = 45,
+         addCoef.col = "black", number.cex = 0.6, col = colorRampPalette(c("#d95f02","white","#1b9e77"))(200),
+         title = "Correlation Matrix: Numeric Concussion Variables", mar = c(0,0,2,0))
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

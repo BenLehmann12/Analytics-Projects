@@ -1,0 +1,220 @@
+---
+title: "ConcussionAnalysis"
+author: "Ben Lehmann"
+date: "2026-08-29"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                       fig.width = 8, fig.height = 5, fig.align = "center")
+```
+
+```{r}
+
+library(tidyverse)
+library(caret)
+library(randomForest)
+library(e1071)
+library(pROC)
+library(corrplot)
+library(gridExtra)
+library(car)
+library(rstatix)
+library(ggpubr)
+library(viridis)
+library(scales)
+library(gbm)
+library(rpart)
+library(pwr)
+library(glmnet)
+
+set.seed(2026)
+theme_set(theme_minimal(base_size = 12))
+pal <- c("Low" = "#2E8B57", "Moderate" = "#E8A33D", "Severe" = "#C0392B")
+```
+
+
+
+
+# Data Loading & Preparation
+
+```{r load-data}
+df_raw <- read_csv("athlete_concussion_enriched_30k.csv", show_col_types = FALSE)
+
+df_raw <- df_raw %>%
+  mutate(
+    injury_date        = mdy(injury_date),
+    return_to_play_date = mdy(return_to_play_date)
+  )
+
+glimpse(df_raw)
+```
+
+
+## Building the SCAT5 severity scale
+
+We convert the continuous `scat5_acute` score (higher = healthier) into an
+ordered clinical severity scale using **tertiles**, so each severity band
+contains a comparable number of athletes. Tertile-based (data-driven) cut
+points are a standard approach when a validated clinical cut-score is not
+available, and they are documented explicitly here so the boundaries are
+fully reproducible.
+
+```{r severity-scale}
+q <- quantile(df_raw$scat5_acute, probs = c(1/3, 2/3), na.rm = TRUE)
+cat("Tertile cut points for scat5_acute:\n"); print(q)
+
+df <- df_raw %>%
+  mutate(
+    scat5_severity = case_when(
+      scat5_acute >= q[2] ~ "Low",       # highest acute scores -> mildest injury
+      scat5_acute >= q[1] ~ "Moderate",
+      TRUE                ~ "Severe"     # lowest acute scores -> most severe injury
+    ),
+    scat5_severity = factor(scat5_severity, levels = c("Low", "Moderate", "Severe"), ordered = TRUE),
+
+    # a few analysis-ready derived variables
+    age_group = case_when(
+      age_at_injury < 18 ~ "Under 18",
+      age_at_injury <= 22 ~ "18-22",
+      TRUE ~ "23+"
+    ),
+    age_group = factor(age_group, levels = c("Under 18", "18-22", "23+")),
+    recovery_speed = case_when(
+      days_to_rtp <= 10 ~ "Fast (<=10d)",
+      days_to_rtp <= 18 ~ "Typical (11-18d)",
+      TRUE ~ "Slow (19+d)"
+    ),
+    recovery_speed = factor(recovery_speed, levels = c("Fast (<=10d)", "Typical (11-18d)", "Slow (19+d)")),
+    prolonged_rtp_f = factor(prolonged_rtp, levels = c(0, 1), labels = c("No", "Yes")),
+    sex_f = factor(sex, levels = c("F", "M")),
+    loc_f  = factor(loss_of_consciousness, levels = c("No", "Yes")),
+    amnesia_f = factor(amnesia_present, levels = c("No", "Yes")),
+    imaging_f = factor(imaging_ordered, levels = c("No", "Yes")),
+    high_contact_f = factor(high_contact, levels = c(0,1), labels = c("Low/Non-contact","High-contact"))
+  )
+
+table(df$scat5_severity)
+```
+
+
+```{r severity-scale-viz, fig.height=4}
+ggplot(df, aes(x = scat5_severity, fill = scat5_severity)) +
+  geom_bar() +
+  geom_text(stat = "count", aes(label = after_stat(count)), vjust = -0.4) +
+  scale_fill_manual(values = pal) +
+  labs(title = "SCAT5 Acute Severity Scale (tertile-derived)",
+       subtitle = paste0("Cut points on scat5_acute: Severe < ", round(q[1],1),
+                          "  |  Moderate ", round(q[1],1), "-", round(q[2],1),
+                          "  |  Low >= ", round(q[2],1)),
+       x = NULL, y = "Number of athletes") +
+  theme(legend.position = "none")
+```
+
+
+# Descriptive & Exploratory Analysis
+
+## Overall summary statistics
+```{r desc-summary}
+df %>%
+  select(scat5_acute, scat5_pre_rtp, scat5_improvement, baseline_scat5,
+         days_to_rtp, age_at_injury, symptom_count_acute,
+         headache_severity_0_10, sleep_hours_post_injury, bmi) %>%
+  summarise(across(everything(),
+    list(mean = ~mean(.x, na.rm=TRUE), sd = ~sd(.x, na.rm=TRUE),
+         median = ~median(.x, na.rm=TRUE), min = ~min(.x, na.rm=TRUE), max = ~max(.x, na.rm=TRUE)),
+    .names = "{.col}__{.fn}")) %>%
+  pivot_longer(everything(), names_to = c("variable","stat"), names_sep = "__") %>%
+  pivot_wider(names_from = stat, values_from = value) %>%
+  mutate(across(where(is.numeric), ~round(.x, 2)))
+```
+
+
+
+## Distribution of key outcomes
+
+```{r dist-plots, fig.height=8}
+p1 <- ggplot(df, aes(scat5_acute)) + geom_histogram(bins=30, fill="#4472C4", color="white") +
+  labs(title="Acute SCAT5 Score", x="scat5_acute", y="Count")
+p2 <- ggplot(df, aes(days_to_rtp)) + geom_histogram(bins=25, fill="#ED7D31", color="white") +
+  labs(title="Days to Return-to-Play", x="days_to_rtp", y="Count")
+p3 <- ggplot(df, aes(scat5_improvement)) + geom_histogram(bins=30, fill="#70AD47", color="white") +
+  labs(title="SCAT5 Improvement (pre-RTP minus acute)", x="scat5_improvement", y="Count")
+p4 <- ggplot(df, aes(headache_severity_0_10)) + geom_histogram(bins=11, fill="#A5A5A5", color="white") +
+  labs(title="Headache Severity (0-10)", x="headache_severity_0_10", y="Count")
+grid.arrange(p1, p2, p3, p4, ncol = 2)
+```
+
+
+## Severity by sport, sex, and team level
+
+```{r severity-by-groups, fig.height=9}
+p5 <- df %>% count(sport, scat5_severity) %>%
+  ggplot(aes(x = reorder(sport, n, sum), y = n, fill = scat5_severity)) +
+  geom_col(position = "fill") + coord_flip() +
+  scale_fill_manual(values = pal) + scale_y_continuous(labels = percent) +
+  labs(title="Severity Composition by Sport", x=NULL, y="Proportion", fill="Severity")
+
+p6 <- df %>% count(sex, scat5_severity) %>%
+  ggplot(aes(x = sex, y = n, fill = scat5_severity)) +
+  geom_col(position = "fill") + scale_fill_manual(values = pal) +
+  scale_y_continuous(labels = percent) +
+  labs(title="Severity Composition by Sex", x=NULL, y="Proportion", fill="Severity")
+
+p7 <- df %>% count(team_level, scat5_severity) %>%
+  ggplot(aes(x = team_level, y = n, fill = scat5_severity)) +
+  geom_col(position = "fill") + scale_fill_manual(values = pal) +
+  scale_y_continuous(labels = percent) +
+  labs(title="Severity Composition by Team Level", x=NULL, y="Proportion", fill="Severity")
+
+grid.arrange(p5, arrangeGrob(p6, p7, ncol = 2), nrow = 2, heights = c(1.3, 1))
+```
+
+
+
+## Days to return-to-play by severity
+
+```{r rtp-by-severity, fig.height=5}
+ggplot(df, aes(x = scat5_severity, y = days_to_rtp, fill = scat5_severity)) +
+  geom_violin(alpha = 0.6, trim = FALSE) +
+  geom_boxplot(width = 0.15, fill = "white", outlier.size = 0.6) +
+  scale_fill_manual(values = pal) +
+  labs(title = "Return-to-Play Time by SCAT5 Severity Category",
+       x = NULL, y = "Days to Return-to-Play") +
+  theme(legend.position = "none")
+```
+
+
+## Correlation structure among numeric variables
+
+```{r corr-matrix, fig.height=8, fig.width=8}
+num_vars <- df %>%
+  select(scat5_acute, scat5_pre_rtp, scat5_improvement, baseline_scat5,
+         days_to_rtp, age_at_injury, total_games_played, total_elite_years,
+         symptom_count_acute, headache_severity_0_10, sleep_hours_post_injury,
+         bmi, games_per_year, concussion_number) %>%
+  rename_with(~str_trunc(.x, 18))
+
+corr_mat <- cor(num_vars, use = "pairwise.complete.obs")
+corrplot(corr_mat, method = "color", type = "upper", tl.col = "black",
+         tl.srt = 45, addCoef.col = "grey30", number.cex = 0.55,
+         col = colorRampPalette(c("#C0392B","white","#2E6DA4"))(200),
+         title = "Correlation Matrix: Numeric Concussion Variables", mar=c(0,0,2,0))
+```
+
+
+
+
+**Reading the matrix:** `scat5_acute` and `symptom_count_acute` /
+`headache_severity_0_10` are expected to move in opposite directions (more
+symptoms, lower score), and `days_to_rtp` should relate negatively to
+`scat5_acute` (worse injuries take longer to clear) — the sections below test
+these relationships formally.
+
+
+
+
+
+
+

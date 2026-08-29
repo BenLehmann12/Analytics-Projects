@@ -1,0 +1,552 @@
+---
+title: "ConcussionAnalysis"
+author: "Ben Lehmann"
+date: "2026-08-29"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                       fig.width = 8, fig.height = 5, fig.align = "center")
+```
+
+
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(scales)
+library(viridis)
+library(corrplot)
+library(reshape2)
+library(gridExtra)
+library(patchwork)
+library(car)
+library(broom)
+library(pROC)
+library(caret)
+library(randomForest)
+library(rpart)
+library(nnet)
+library(MASS)
+library(glmnet)
+library(cluster)
+library(factoextra)
+library(pwr)
+library(knitr)
+
+theme_set(
+  theme_minimal(base_size = 12) +
+    theme(
+      plot.title = element_text(face = "bold", size = 13),
+      plot.subtitle = element_text(color = "grey30"),
+      panel.grid.minor = element_blank(),
+      strip.text = element_text(face = "bold")
+    )
+)
+
+pal <- c("#1b9e77", "#d95f02", "#7570b3", "#e7298a", "#66a61e",
+         "#e6ab02", "#a6761d", "#666666", "#377eb8")
+
+set.seed(42)
+```
+
+
+
+
+```{r}
+df <- read.csv("athlete_concussion_enriched_30k.csv", stringsAsFactors = FALSE)
+
+df <- df %>%
+  mutate(
+    injury_date = as.Date(injury_date, format = "%m/%d/%Y"),
+    return_to_play_date = as.Date(return_to_play_date, format = "%m/%d/%Y"),
+    sex = factor(sex, levels = c("F", "M")),
+    team_level = factor(team_level, levels = c("Youth/High School", "Collegiate", "Elite/Pro")),
+    sport = factor(sport),
+    season = factor(season, levels = c("Spring","Summer","Fall","Winter")),
+    injury_setting = factor(injury_setting),
+    concussion_mechanism = factor(concussion_mechanism),
+    loss_of_consciousness = factor(loss_of_consciousness, levels = c("No","Yes")),
+    amnesia_present = factor(amnesia_present, levels = c("No","Yes")),
+    imaging_ordered = factor(imaging_ordered, levels = c("No","Yes")),
+    prolonged_rtp_f = factor(prolonged_rtp, levels = c(0,1), labels = c("Normal RTP","Prolonged RTP")),
+    high_contact_f = factor(high_contact, levels = c(0,1), labels = c("Lower-Contact","High-Contact")),
+    pct_of_baseline = round(scat5_acute / baseline_scat5 * 100, 1)
+  )
+
+n_athletes <- n_distinct(df$athlete_id)
+kable(data.frame(
+  Metric = c("Total concussion events", "Unique athletes", "Sports represented",
+             "Training centers", "Date range"),
+  Value = c(format(nrow(df), big.mark=","), format(n_athletes, big.mark=","),
+            n_distinct(df$sport), n_distinct(df$training_center),
+            paste(min(df$injury_date, na.rm=TRUE), "to", max(df$injury_date, na.rm=TRUE)))
+), caption = "Dataset Overview")
+```
+
+
+
+
+# Building the SCAT5 Severity Scale
+
+Rather than use arbitrary cut points on the raw `scat5_acute` score, we anchor severity to **each athlete's own healthy baseline** by computing:
+
+$$\text{Percent of Baseline} = \frac{\text{scat5\_acute}}{\text{baseline\_scat5}} \times 100$$
+
+
+```{r}
+df <- df %>%
+  mutate(
+    severity_scale_3 = case_when(
+      pct_of_baseline < 35 ~ "Severe",
+      pct_of_baseline < 55 ~ "Medium",
+      TRUE ~ "Low"
+    ),
+    severity_scale_3 = factor(severity_scale_3, levels = c("Low","Medium","Severe"), ordered = TRUE),
+
+    severity_scale_5 = case_when(
+      pct_of_baseline < 25 ~ "Very Severe",
+      pct_of_baseline < 35 ~ "Severe",
+      pct_of_baseline < 45 ~ "Moderate",
+      pct_of_baseline < 55 ~ "Mild",
+      TRUE ~ "Minimal"
+    ),
+    severity_scale_5 = factor(severity_scale_5,
+                               levels = c("Minimal","Mild","Moderate","Severe","Very Severe"),
+                               ordered = TRUE)
+  )
+
+kable(df %>% count(severity_scale_3) %>% mutate(pct = percent(n/sum(n))),
+      caption = "3-Level SCAT5 Severity Scale (Low = mildest injury, Severe = worst)")
+kable(df %>% count(severity_scale_5) %>% mutate(pct = percent(n/sum(n))),
+      caption = "5-Level SCAT5 Severity Scale")
+```
+
+
+
+
+```{r}
+p1 <- ggplot(df, aes(x = pct_of_baseline, fill = severity_scale_3)) +
+  geom_histogram(binwidth = 2, color = "white", alpha = 0.9) +
+  geom_vline(xintercept = c(35, 55), linetype = "dashed", color = "grey30") +
+  scale_fill_manual(values = c("Low" = "#1b9e77", "Medium" = "#e6ab02", "Severe" = "#d95f02")) +
+  labs(title = "Distribution of Acute SCAT5 as % of Individual Baseline",
+       subtitle = "Dashed lines mark the Low/Medium/Severe cut points",
+       x = "Percent of Baseline SCAT5 Score", y = "Count", fill = "Severity") +
+  theme(legend.position = "top")
+
+p2 <- ggplot(df, aes(x = severity_scale_3, y = days_to_rtp, fill = severity_scale_3)) +
+  geom_boxplot(alpha = 0.85, outlier.alpha = 0.3) +
+  scale_fill_manual(values = c("Low" = "#1b9e77", "Medium" = "#e6ab02", "Severe" = "#d95f02")) +
+  labs(title = "Days to Return-to-Play by Severity Scale",
+       x = "SCAT5 Severity", y = "Days to RTP") +
+  theme(legend.position = "none")
+
+p3 <- ggplot(df, aes(x = severity_scale_5, y = scat5_acute, fill = severity_scale_5)) +
+  geom_boxplot(alpha = 0.85, outlier.alpha = 0.3) +
+  scale_fill_viridis_d(option = "plasma") +
+  labs(title = "Raw Acute SCAT5 Score by 5-Level Scale",
+       x = "Severity (5-level)", y = "Acute SCAT5 Score") +
+  theme(legend.position = "none", axis.text.x = element_text(angle = 20, hjust = 1))
+
+p4 <- df %>%
+  count(severity_scale_3, prolonged_rtp_f) %>%
+  group_by(severity_scale_3) %>%
+  mutate(pct = n/sum(n)) %>%
+  ggplot(aes(x = severity_scale_3, y = pct, fill = prolonged_rtp_f)) +
+  geom_col(position = "stack", alpha = 0.9) +
+  scale_y_continuous(labels = percent) +
+  scale_fill_manual(values = c("Normal RTP" = "#377eb8", "Prolonged RTP" = "#d95f02")) +
+  labs(title = "Prolonged RTP Rate by Severity Scale", x = "SCAT5 Severity",
+       y = "Proportion of Cases", fill = NULL) +
+  theme(legend.position = "top")
+
+(p1 + p2) / (p3 + p4)
+```
+
+
+
+#EDA
+
+```{r}
+p1 <- ggplot(df, aes(x = days_to_rtp)) +
+  geom_histogram(binwidth = 1, fill = "#377eb8", color = "white", alpha = 0.9) +
+  labs(title = "Days to Return-to-Play", x = "Days", y = "Count")
+
+p2 <- ggplot(df, aes(x = scat5_acute)) +
+  geom_histogram(binwidth = 2, fill = "#d95f02", color = "white", alpha = 0.9) +
+  labs(title = "Acute SCAT5 Score", x = "Score", y = "Count")
+
+p3 <- ggplot(df, aes(x = age_at_injury)) +
+  geom_histogram(binwidth = 1, fill = "#1b9e77", color = "white", alpha = 0.9) +
+  labs(title = "Age at Injury", x = "Age", y = "Count")
+
+p4 <- ggplot(df, aes(x = bmi)) +
+  geom_histogram(binwidth = 0.5, fill = "#7570b3", color = "white", alpha = 0.9) +
+  labs(title = "BMI", x = "BMI", y = "Count")
+
+(p1 + p2) / (p3 + p4)
+```
+
+
+
+
+
+```{r}
+p1 <- df %>%
+  mutate(sport = fct_reorder(sport, days_to_rtp, .fun = median)) %>%
+  ggplot(aes(x = sport, y = days_to_rtp, fill = sport)) +
+  geom_boxplot(alpha = 0.85, outlier.alpha = 0.25) +
+  scale_fill_viridis_d() +
+  coord_flip() +
+  labs(title = "Days to RTP by Sport", x = NULL, y = "Days to RTP") +
+  theme(legend.position = "none")
+
+p2 <- ggplot(df, aes(x = sex, y = scat5_acute, fill = sex)) +
+  geom_violin(alpha = 0.8) +
+  geom_boxplot(width = 0.15, fill = "white", outlier.alpha = 0.2) +
+  scale_fill_manual(values = c("F" = "#e7298a", "M" = "#377eb8")) +
+  labs(title = "Acute SCAT5 by Sex", x = "Sex", y = "Acute SCAT5") +
+  theme(legend.position = "none")
+
+p3 <- ggplot(df, aes(x = team_level, y = days_to_rtp, fill = team_level)) +
+  geom_boxplot(alpha = 0.85, outlier.alpha = 0.25) +
+  scale_fill_manual(values = c("Youth/High School" = "#66a61e", "Collegiate" = "#e6ab02", "Elite/Pro" = "#a6761d")) +
+  labs(title = "Days to RTP by Competition Level", x = NULL, y = "Days to RTP") +
+  theme(legend.position = "none")
+
+p4 <- df %>%
+  count(sport, severity_scale_3) %>%
+  group_by(sport) %>%
+  mutate(pct = n / sum(n)) %>%
+  ggplot(aes(x = fct_reorder(sport, pct * (severity_scale_3=="Severe")), y = pct, fill = severity_scale_3)) +
+  geom_col(position = "stack") +
+  coord_flip() +
+  scale_y_continuous(labels = percent) +
+  scale_fill_manual(values = c("Low" = "#1b9e77", "Medium" = "#e6ab02", "Severe" = "#d95f02")) +
+  labs(title = "Severity Mix by Sport", x = NULL, y = "Proportion", fill = "Severity") +
+  theme(legend.position = "bottom")
+
+(p1 + p2) / (p3 + p4)
+```
+
+
+
+
+
+```{r}
+num_vars <- df %>%
+  dplyr::select(days_to_rtp, scat5_acute, scat5_pre_rtp, scat5_improvement, baseline_scat5,
+                 pct_of_baseline, age_at_injury, total_games_played, total_elite_years,
+                 games_per_year, symptom_count_acute, headache_severity_0_10,
+                 sleep_hours_post_injury, bmi)
+
+cor_mat <- cor(num_vars, use = "pairwise.complete.obs")
+corrplot(cor_mat, method = "color", type = "upper", tl.col = "black", tl.srt = 45,
+         addCoef.col = "black", number.cex = 0.6, col = colorRampPalette(c("#d95f02","white","#1b9e77"))(200),
+         title = "Correlation Matrix: Numeric Concussion Variables", mar = c(0,0,2,0))
+```
+
+
+
+
+# Hypothesis Testing
+
+For every test we report the test statistic, degrees of freedom (where relevant), p-value, effect size, and a plain-language interpretation. Significance is judged at $\alpha = 0.05$ unless otherwise corrected.
+
+## Two-Sample Tests: Sex and Contact Level
+
+**H1 — Sex and days to RTP.** $H_0$: mean days-to-RTP is equal for male and female athletes vs. $H_1$: means differ.
+
+
+```{r}
+t_sex <- t.test(days_to_rtp ~ sex, data = df)
+w_sex <- wilcox.test(days_to_rtp ~ sex, data = df)
+
+d_sex <- df %>% group_by(sex) %>% summarise(n=n(), mean=mean(days_to_rtp), sd=sd(days_to_rtp))
+pooled_sd <- sqrt(((d_sex$n[1]-1)*d_sex$sd[1]^2 + (d_sex$n[2]-1)*d_sex$sd[2]^2) / (sum(d_sex$n)-2))
+cohens_d_sex <- (d_sex$mean[2]-d_sex$mean[1]) / pooled_sd
+
+kable(d_sex, digits = 2, caption = "Days to RTP by Sex")
+kable(data.frame(
+  Test = c("Welch Two-Sample t-test", "Wilcoxon Rank-Sum"),
+  Statistic = c(round(t_sex$statistic,3), round(w_sex$statistic,1)),
+  df = c(round(t_sex$parameter,1), NA),
+  p.value = c(signif(t_sex$p.value,4), signif(w_sex$p.value,4))
+), caption = "Sex Difference in Days-to-RTP")
+cat("Cohen's d =", round(cohens_d_sex,3))
+```
+
+
+
+**H2 — Contact level and days to RTP.** $H_0$: mean days-to-RTP equal for high-contact vs. lower-contact sports.
+
+```{r}
+t_contact <- t.test(days_to_rtp ~ high_contact_f, data = df)
+d_contact <- df %>% group_by(high_contact_f) %>% summarise(n=n(), mean=mean(days_to_rtp), sd=sd(days_to_rtp))
+pooled_sd_c <- sqrt(((d_contact$n[1]-1)*d_contact$sd[1]^2 + (d_contact$n[2]-1)*d_contact$sd[2]^2) / (sum(d_contact$n)-2))
+cohens_d_contact <- (d_contact$mean[2]-d_contact$mean[1]) / pooled_sd_c
+
+kable(d_contact, digits = 2, caption = "Days to RTP by Contact Level")
+kable(tidy(t_contact) %>% dplyr::select(estimate1, estimate2, statistic, parameter, p.value, conf.low, conf.high),
+      digits = 4, caption = "Welch t-test: High-Contact vs Lower-Contact")
+cat("Cohen's d =", round(cohens_d_contact,3))
+```
+
+
+`r if(t_contact$p.value < 0.05) "**Conclusion:** We reject H0 -- athletes in high-contact sports take significantly longer to return to play." else "**Conclusion:** We fail to reject H0."`
+
+
+## One-Way ANOVA: Acute SCAT5 Across Sports
+
+$H_0$: mean acute SCAT5 is equal across all 9 sports. $H_1$: at least one sport differs.
+
+```{r}
+aov_sport <- aov(scat5_acute ~ sport, data = df)
+print(summary(aov_sport))
+
+# Effect size (eta squared)
+ss <- summary(aov_sport)[[1]]
+eta_sq <- ss[1,"Sum Sq"] / sum(ss[,"Sum Sq"])
+cat("\nEta-squared (effect size):", round(eta_sq, 4), "\n")
+
+leveneTest(scat5_acute ~ sport, data = df) %>% tidy() %>% kable(digits=4, caption = "Levene's Test for Homogeneity of Variance")
+```
+
+
+
+Given the large sample size, the omnibus ANOVA is virtually guaranteed to be significant; the **eta-squared** effect size tells us how *practically* important sport is. We follow up with a Tukey HSD post-hoc test to see which specific sport pairs differ.
+
+
+```{r}
+tukey_res <- TukeyHSD(aov_sport)
+tukey_df <- as.data.frame(tukey_res$sport) %>%
+  rownames_to_column("comparison") %>%
+  arrange(`p adj`)
+
+kable(head(tukey_df, 15), digits = 4, caption = "Top 15 Most Significant Tukey HSD Pairwise Comparisons (Sport)")
+
+tukey_df %>%
+  mutate(sig = `p adj` < 0.05, comparison = fct_reorder(comparison, diff)) %>%
+  ggplot(aes(x = diff, y = comparison, color = sig)) +
+  geom_point(size = 2) +
+  geom_errorbarh(aes(xmin = lwr, xmax = upr), height = 0.2) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  scale_color_manual(values = c(`TRUE` = "#d95f02", `FALSE` = "grey60")) +
+  labs(title = "Tukey HSD 95% CIs: Pairwise Sport Differences in Acute SCAT5",
+       x = "Difference in Means", y = NULL, color = "p < 0.05")
+```
+
+
+
+
+
+## Chi-Square Tests of Association
+
+We test whether **prolonged RTP** (binary outcome) is associated with several categorical risk factors.
+
+```{r}
+run_chisq <- function(var) {
+  tab <- table(df[[var]], df$prolonged_rtp_f)
+  test <- chisq.test(tab)
+  data.frame(
+    Variable = var,
+    Chi_sq = round(unname(test$statistic), 2),
+    df = unname(test$parameter),
+    p.value = signif(test$p.value, 4),
+    Cramers_V = round(sqrt(unname(test$statistic) / (sum(tab) * (min(dim(tab)) - 1))), 4)
+  )
+}
+
+chisq_vars <- c("sex", "high_contact_f", "loss_of_consciousness", "amnesia_present",
+                "imaging_ordered", "team_level", "season", "repeat_concussion")
+chisq_results <- map_dfr(chisq_vars, run_chisq) %>% arrange(p.value)
+kable(chisq_results, caption = "Chi-Square Tests: Association with Prolonged RTP")
+```
+
+
+```{r}
+df %>%
+  count(loss_of_consciousness, amnesia_present, prolonged_rtp_f) %>%
+  group_by(loss_of_consciousness, amnesia_present) %>%
+  mutate(pct = n/sum(n)) %>%
+  filter(prolonged_rtp_f == "Prolonged RTP") %>%
+  ggplot(aes(x = loss_of_consciousness, y = pct, fill = amnesia_present)) +
+  geom_col(position = "dodge", alpha = 0.9) +
+  scale_y_continuous(labels = percent) +
+  scale_fill_manual(values = c("No" = "#1b9e77", "Yes" = "#d95f02")) +
+  labs(title = "Prolonged RTP Rate by Loss of Consciousness and Amnesia",
+       x = "Loss of Consciousness", y = "Prolonged RTP Rate", fill = "Amnesia Present")
+```
+
+**Interpretation:** Variables with `p.value < 0.05` show a statistically significant association with prolonged recovery. Cramer's V indicates the *strength* of association (values near 0 = weak, near 1 = strong) — this matters because with n = 30,000, even trivial associations can reach significance.
+
+
+
+## Correlation Significance Tests
+
+```{r}
+cor_test_age <- cor.test(df$age_at_injury, df$scat5_acute, method = "pearson")
+cor_test_games <- cor.test(df$total_games_played, df$days_to_rtp, method = "pearson")
+cor_test_sleep <- cor.test(df$sleep_hours_post_injury, df$scat5_acute, method = "spearman")
+
+kable(data.frame(
+  Pair = c("Age at Injury vs Acute SCAT5", "Career Games Played vs Days to RTP",
+           "Post-Injury Sleep vs Acute SCAT5 (Spearman)"),
+  r = c(round(cor_test_age$estimate,4), round(cor_test_games$estimate,4), round(cor_test_sleep$estimate,4)),
+  p.value = c(signif(cor_test_age$p.value,4), signif(cor_test_games$p.value,4), signif(cor_test_sleep$p.value,4))
+), caption = "Correlation Significance Tests")
+```
+
+
+# Multiple Testing Correction
+
+Running many pairwise tests inflates the family-wise Type I error rate. As an example, we test **all pairwise combinations of the 9 sports** on acute SCAT5 score (36 tests) and on days-to-RTP (36 tests) — 72 tests total — and compare uncorrected p-values against **Bonferroni** and **Benjamini-Hochberg (FDR)** corrections.
+
+```{r}
+sports <- levels(df$sport)
+pairs_grid <- combn(sports, 2, simplify = FALSE)
+
+run_pairwise <- function(pair, outcome) {
+  d1 <- df[[outcome]][df$sport == pair[1]]
+  d2 <- df[[outcome]][df$sport == pair[2]]
+  tt <- t.test(d1, d2)
+  data.frame(outcome = outcome, sport1 = pair[1], sport2 = pair[2],
+             mean_diff = round(mean(d1) - mean(d2), 3),
+             raw_p = tt$p.value)
+}
+
+mt_scat5 <- map_dfr(pairs_grid, run_pairwise, outcome = "scat5_acute")
+mt_rtp   <- map_dfr(pairs_grid, run_pairwise, outcome = "days_to_rtp")
+mt_all <- bind_rows(mt_scat5, mt_rtp) %>%
+  mutate(
+    bonferroni_p = p.adjust(raw_p, method = "bonferroni"),
+    BH_p = p.adjust(raw_p, method = "BH")
+  )
+
+summary_tbl <- mt_all %>%
+  group_by(outcome) %>%
+  summarise(
+    n_tests = n(),
+    sig_uncorrected = sum(raw_p < 0.05),
+    sig_bonferroni = sum(bonferroni_p < 0.05),
+    sig_BH_FDR = sum(BH_p < 0.05)
+  )
+kable(summary_tbl, caption = "Number of Significant Sport-Pair Comparisons Before/After Correction (72 tests total)")
+
+kable(mt_all %>% arrange(raw_p) %>% dplyr::select(outcome, sport1, sport2, mean_diff, raw_p, bonferroni_p, BH_p) %>% head(10),
+      digits = 5, caption = "Top 10 Sport-Pair Comparisons by Raw p-value, with Corrections")
+```
+
+
+```{r}
+mt_all %>%
+  mutate(rank = row_number(), .by = outcome) %>%
+  arrange(outcome, raw_p) %>%
+  group_by(outcome) %>%
+  mutate(rank = row_number()) %>%
+  ggplot(aes(x = rank)) +
+  geom_point(aes(y = raw_p, color = "Raw p-value"), size = 1.5, alpha = 0.7) +
+  geom_point(aes(y = bonferroni_p, color = "Bonferroni"), size = 1.5, alpha = 0.7) +
+  geom_point(aes(y = BH_p, color = "Benjamini-Hochberg"), size = 1.5, alpha = 0.7) +
+  geom_hline(yintercept = 0.05, linetype = "dashed", color = "grey40") +
+  facet_wrap(~outcome, scales = "free_x") +
+  scale_color_manual(values = c("Raw p-value" = "grey50", "Bonferroni" = "#d95f02", "Benjamini-Hochberg" = "#1b9e77")) +
+  labs(title = "P-value Correction Comparison Across 36 Sport-Pair Tests per Outcome",
+       x = "Test Rank (sorted by raw p)", y = "P-value", color = NULL) +
+  theme(legend.position = "top")
+```
+
+**Bonferroni** (which controls family-wise error rate) is the most conservative and shrinks the number of "significant" pairs the most, while **Benjamini-Hochberg** (which controls false discovery rate) retains more true positives while still guarding against inflation from running 72 simultaneous tests.
+
+# A/B Testing: High-Contact vs. Lower-Contact Sports
+
+We formally frame **high-contact sports (Football, Hockey, Lacrosse, Rugby) as "Group B"** and **lower-contact sports (Baseball, Basketball, Flag Football, Soccer, Softball) as "Group A"**, and test whether Group B has a higher **prolonged-RTP rate** — a binary conversion-style outcome, analogous to a product A/B test.
+
+## Experiment Setup
+```{r}
+ab_tab <- df %>%
+  mutate(group = ifelse(high_contact == 1, "B: High-Contact", "A: Lower-Contact")) %>%
+  group_by(group) %>%
+  summarise(n = n(), prolonged = sum(prolonged_rtp), rate = mean(prolonged_rtp))
+
+kable(ab_tab, digits = 4, caption = "A/B Groups: Sample Sizes and Prolonged-RTP Conversion Rates")
+```
+
+## Two-Proportion Z-Test
+
+$H_0: p_A = p_B$ (equal prolonged-RTP rates) vs. $H_1: p_B > p_A$ (one-sided).
+
+
+```{r}
+x <- ab_tab$prolonged[ab_tab$group == "B: High-Contact"]
+n_b <- ab_tab$n[ab_tab$group == "B: High-Contact"]
+x_a <- ab_tab$prolonged[ab_tab$group == "A: Lower-Contact"]
+n_a <- ab_tab$n[ab_tab$group == "A: Lower-Contact"]
+
+prop_test <- prop.test(x = c(x, x_a), n = c(n_b, n_a), alternative = "greater", correct = TRUE)
+print(prop_test)
+
+# Effect size: Cohen's h
+p1 <- x/n_b; p2 <- x_a/n_a
+cohens_h <- 2*asin(sqrt(p1)) - 2*asin(sqrt(p2))
+cat("\nCohen's h (effect size):", round(cohens_h, 4), "\n")
+
+# Relative risk & odds ratio
+rr <- p1 / p2
+odds_ratio <- (p1/(1-p1)) / (p2/(1-p2))
+cat("Relative Risk (B vs A):", round(rr, 3), "\n")
+cat("Odds Ratio (B vs A):", round(odds_ratio, 3), "\n")
+```
+
+
+
+## Confidence Interval on the Difference
+```{r}
+diff_p <- p1 - p2
+se_diff <- sqrt(p1*(1-p1)/n_b + p2*(1-p2)/n_a)
+ci_low <- diff_p - 1.96*se_diff
+ci_high <- diff_p + 1.96*se_diff
+cat("Difference in proportions (B - A):", round(diff_p, 4), "\n")
+cat("95% CI: [", round(ci_low, 4), ",", round(ci_high, 4), "]\n")
+```
+
+
+## Statistical Power of the Observed Experiment
+```{r}
+pwr_res <- pwr.2p2n.test(h = cohens_h, n1 = n_b, n2 = n_a, sig.level = 0.05, alternative = "greater")
+print(pwr_res)
+
+# Minimum sample size needed to detect a smaller effect (h = 0.05) at 80% power, for planning future experiments
+pwr_needed <- pwr.2p.test(h = 0.05, sig.level = 0.05, power = 0.8, alternative = "greater")
+cat("\nSample size needed per group to detect a small effect (h=0.05) at 80% power:", ceiling(pwr_needed$n), "\n")
+```
+
+```{r}
+p1_plot <- ab_tab %>%
+  ggplot(aes(x = group, y = rate, fill = group)) +
+  geom_col(alpha = 0.9, width = 0.55) +
+  geom_errorbar(aes(ymin = rate - 1.96*sqrt(rate*(1-rate)/n), ymax = rate + 1.96*sqrt(rate*(1-rate)/n)), width = 0.15) +
+  geom_text(aes(label = percent(rate, accuracy = 0.1)), vjust = -1.8, fontface = "bold") +
+  scale_y_continuous(labels = percent, expand = expansion(mult = c(0,0.15))) +
+  scale_fill_manual(values = c("A: Lower-Contact" = "#377eb8", "B: High-Contact" = "#d95f02")) +
+  labs(title = "A/B Test: Prolonged-RTP Rate", subtitle = "Error bars = 95% CI",
+       x = NULL, y = "Prolonged RTP Rate") +
+  theme(legend.position = "none")
+
+p2_plot <- df %>%
+  mutate(group = ifelse(high_contact == 1, "B: High-Contact", "A: Lower-Contact")) %>%
+  ggplot(aes(x = group, y = days_to_rtp, fill = group)) +
+  geom_violin(alpha = 0.8) +
+  geom_boxplot(width = 0.12, fill = "white", outlier.alpha = 0.2) +
+  scale_fill_manual(values = c("A: Lower-Contact" = "#377eb8", "B: High-Contact" = "#d95f02")) +
+  labs(title = "Days to RTP Distribution by Group", x = NULL, y = "Days to RTP") +
+  theme(legend.position = "none")
+
+p1_plot + p2_plot
+```
+
+
+**Conclusion:** `r if(prop_test$p.value < 0.05) paste0("The one-sided two-proportion z-test is statistically significant (p = ", signif(prop_test$p.value,4), "), and the 95% CI on the rate difference excludes zero. High-contact sports show a ", round(diff_p*100,1), " percentage-point higher prolonged-RTP rate, an effect the experiment was well-powered to detect (power = ", round(pwr_res$power,3), ").") else "The test did not reach significance at alpha = 0.05."`
+
+

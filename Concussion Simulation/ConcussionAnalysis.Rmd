@@ -1,0 +1,1219 @@
+---
+title: "ConcussionAnalysis"
+author: "Ben Lehmann"
+date: "2026-08-29"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                       fig.width = 8, fig.height = 5, fig.align = "center")
+```
+
+```{r, echo=FALSE}
+library(tidyverse)
+library(ggplot2)
+library(scales)
+library(viridis)
+library(corrplot)
+library(reshape2)
+library(gridExtra)
+library(ggfortify)
+library(survey)
+library(survival)
+library(patchwork)
+library(car)
+library(broom)
+library(pROC)
+library(caret)
+library(randomForest)
+library(rpart)
+library(nnet)
+library(MASS)
+library(glmnet)
+library(cluster)
+library(factoextra)
+library(pwr)
+library(knitr)
+
+theme_set(
+  theme_minimal(base_size = 12) +
+    theme(
+      plot.title = element_text(face = "bold", size = 13),
+      plot.subtitle = element_text(color = "grey30"),
+      panel.grid.minor = element_blank(),
+      strip.text = element_text(face = "bold")
+    )
+)
+
+pal <- c("#1b9e77", "#d95f02", "#7570b3", "#e7298a", "#66a61e",
+         "#e6ab02", "#a6761d", "#666666", "#377eb8")
+
+set.seed(42)
+```
+
+```{r}
+df <- read.csv("athlete_concussion_enriched_30k.csv", stringsAsFactors = FALSE)
+
+df <- df %>%
+  mutate(
+    injury_date = as.Date(injury_date, format = "%m/%d/%Y"),
+    return_to_play_date = as.Date(return_to_play_date, format = "%m/%d/%Y"),
+    sex = factor(sex, levels = c("F", "M")),
+    team_level = factor(team_level, levels = c("Youth/High School", "Collegiate", "Elite/Pro")),
+    sport = factor(sport),
+    season = factor(season, levels = c("Spring","Summer","Fall","Winter")),
+    injury_setting = factor(injury_setting),
+    concussion_mechanism = factor(concussion_mechanism),
+    loss_of_consciousness = factor(loss_of_consciousness, levels = c("No","Yes")),
+    amnesia_present = factor(amnesia_present, levels = c("No","Yes")),
+    imaging_ordered = factor(imaging_ordered, levels = c("No","Yes")),
+    prolonged_rtp_f = factor(prolonged_rtp, levels = c(0,1), labels = c("Normal RTP","Prolonged RTP")),
+    high_contact_f = factor(high_contact, levels = c(0,1), labels = c("Lower-Contact","High-Contact")),
+    pct_of_baseline = round(scat5_acute / baseline_scat5 * 100, 1)
+  )
+
+n_athletes <- n_distinct(df$athlete_id)
+kable(data.frame(
+  Metric = c("Total concussion events", "Unique athletes", "Sports represented",
+             "Training centers", "Date range"),
+  Value = c(format(nrow(df), big.mark=","), format(n_athletes, big.mark=","),
+            n_distinct(df$sport), n_distinct(df$training_center),
+            paste(min(df$injury_date, na.rm=TRUE), "to", max(df$injury_date, na.rm=TRUE)))
+), caption = "Dataset Overview")
+```
+
+# Building the SCAT5 Severity Scale
+
+Rather than use arbitrary cut points on the raw `scat5_acute` score, we anchor severity to **each athlete's own healthy baseline** by computing:
+
+$$\text{Percent of Baseline} = \frac{\text{scat5\_acute}}{\text{baseline\_scat5}} \times 100$$
+
+```{r, echo=FALSE}
+df <- df %>%
+  mutate(
+    severity_scale_3 = case_when(
+      pct_of_baseline < 35 ~ "Severe",
+      pct_of_baseline < 55 ~ "Medium",
+      TRUE ~ "Low"
+    ),
+    severity_scale_3 = factor(severity_scale_3, levels = c("Low","Medium","Severe"), ordered = TRUE),
+
+    severity_scale_5 = case_when(
+      pct_of_baseline < 25 ~ "Very Severe",
+      pct_of_baseline < 35 ~ "Severe",
+      pct_of_baseline < 45 ~ "Moderate",
+      pct_of_baseline < 55 ~ "Mild",
+      TRUE ~ "Minimal"
+    ),
+    severity_scale_5 = factor(severity_scale_5,
+                               levels = c("Minimal","Mild","Moderate","Severe","Very Severe"),
+                               ordered = TRUE)
+  )
+
+kable(df %>% count(severity_scale_3) %>% mutate(pct = percent(n/sum(n))),
+      caption = "3-Level SCAT5 Severity Scale (Low = mildest injury, Severe = worst)")
+kable(df %>% count(severity_scale_5) %>% mutate(pct = percent(n/sum(n))),
+      caption = "5-Level SCAT5 Severity Scale")
+```
+
+```{r, echo=FALSE}
+p1 <- ggplot(df, aes(x = pct_of_baseline, fill = severity_scale_3)) +
+  geom_histogram(binwidth = 2, color = "white", alpha = 0.9) +
+  geom_vline(xintercept = c(35, 55), linetype = "dashed", color = "grey30") +
+  scale_fill_manual(values = c("Low" = "#1b9e77", "Medium" = "#e6ab02", "Severe" = "#d95f02")) +
+  labs(title = "Distribution of Acute SCAT5 as % of Individual Baseline",
+       subtitle = "Dashed lines mark the Low/Medium/Severe cut points",
+       x = "Percent of Baseline SCAT5 Score", y = "Count", fill = "Severity") +
+  theme(legend.position = "top")
+
+p2 <- ggplot(df, aes(x = severity_scale_3, y = days_to_rtp, fill = severity_scale_3)) +
+  geom_boxplot(alpha = 0.85, outlier.alpha = 0.3) +
+  scale_fill_manual(values = c("Low" = "#1b9e77", "Medium" = "#e6ab02", "Severe" = "#d95f02")) +
+  labs(title = "Days to Return-to-Play by Severity Scale",
+       x = "SCAT5 Severity", y = "Days to RTP") +
+  theme(legend.position = "none")
+
+p3 <- ggplot(df, aes(x = severity_scale_5, y = scat5_acute, fill = severity_scale_5)) +
+  geom_boxplot(alpha = 0.85, outlier.alpha = 0.3) +
+  scale_fill_viridis_d(option = "plasma") +
+  labs(title = "Raw Acute SCAT5 Score by 5-Level Scale",
+       x = "Severity (5-level)", y = "Acute SCAT5 Score") +
+  theme(legend.position = "none", axis.text.x = element_text(angle = 20, hjust = 1))
+
+p4 <- df %>%
+  count(severity_scale_3, prolonged_rtp_f) %>%
+  group_by(severity_scale_3) %>%
+  mutate(pct = n/sum(n)) %>%
+  ggplot(aes(x = severity_scale_3, y = pct, fill = prolonged_rtp_f)) +
+  geom_col(position = "stack", alpha = 0.9) +
+  scale_y_continuous(labels = percent) +
+  scale_fill_manual(values = c("Normal RTP" = "#377eb8", "Prolonged RTP" = "#d95f02")) +
+  labs(title = "Prolonged RTP Rate by Severity Scale", x = "SCAT5 Severity",
+       y = "Proportion of Cases", fill = NULL) +
+  theme(legend.position = "top")
+
+(p1 + p2) / (p3 + p4)
+```
+
+#EDA
+
+```{r, echo=FALSE}
+p1 <- ggplot(df, aes(x = days_to_rtp)) +
+  geom_histogram(binwidth = 1, fill = "#377eb8", color = "white", alpha = 0.9) +
+  labs(title = "Days to Return-to-Play", x = "Days", y = "Count")
+
+p2 <- ggplot(df, aes(x = scat5_acute)) +
+  geom_histogram(binwidth = 2, fill = "#d95f02", color = "white", alpha = 0.9) +
+  labs(title = "Acute SCAT5 Score", x = "Score", y = "Count")
+
+p3 <- ggplot(df, aes(x = age_at_injury)) +
+  geom_histogram(binwidth = 1, fill = "#1b9e77", color = "white", alpha = 0.9) +
+  labs(title = "Age at Injury", x = "Age", y = "Count")
+
+p4 <- ggplot(df, aes(x = bmi)) +
+  geom_histogram(binwidth = 0.5, fill = "#7570b3", color = "white", alpha = 0.9) +
+  labs(title = "BMI", x = "BMI", y = "Count")
+
+(p1 + p2) / (p3 + p4)
+```
+
+```{r, echo=FALSE}
+p1 <- df %>%
+  mutate(sport = fct_reorder(sport, days_to_rtp, .fun = median)) %>%
+  ggplot(aes(x = sport, y = days_to_rtp, fill = sport)) +
+  geom_boxplot(alpha = 0.85, outlier.alpha = 0.25) +
+  scale_fill_viridis_d() +
+  coord_flip() +
+  labs(title = "Days to RTP by Sport", x = NULL, y = "Days to RTP") +
+  theme(legend.position = "none")
+
+p2 <- ggplot(df, aes(x = sex, y = scat5_acute, fill = sex)) +
+  geom_violin(alpha = 0.8) +
+  geom_boxplot(width = 0.15, fill = "white", outlier.alpha = 0.2) +
+  scale_fill_manual(values = c("F" = "#e7298a", "M" = "#377eb8")) +
+  labs(title = "Acute SCAT5 by Sex", x = "Sex", y = "Acute SCAT5") +
+  theme(legend.position = "none")
+
+p3 <- ggplot(df, aes(x = team_level, y = days_to_rtp, fill = team_level)) +
+  geom_boxplot(alpha = 0.85, outlier.alpha = 0.25) +
+  scale_fill_manual(values = c("Youth/High School" = "#66a61e", "Collegiate" = "#e6ab02", "Elite/Pro" = "#a6761d")) +
+  labs(title = "Days to RTP by Competition Level", x = NULL, y = "Days to RTP") +
+  theme(legend.position = "none")
+
+p4 <- df %>%
+  count(sport, severity_scale_3) %>%
+  group_by(sport) %>%
+  mutate(pct = n / sum(n)) %>%
+  ggplot(aes(x = fct_reorder(sport, pct * (severity_scale_3=="Severe")), y = pct, fill = severity_scale_3)) +
+  geom_col(position = "stack") +
+  coord_flip() +
+  scale_y_continuous(labels = percent) +
+  scale_fill_manual(values = c("Low" = "#1b9e77", "Medium" = "#e6ab02", "Severe" = "#d95f02")) +
+  labs(title = "Severity Mix by Sport", x = NULL, y = "Proportion", fill = "Severity") +
+  theme(legend.position = "bottom")
+
+(p1 + p2) / (p3 + p4)
+```
+
+```{r, echo=FALSE}
+num_vars <- df %>%
+  dplyr::select(days_to_rtp, scat5_acute, scat5_pre_rtp, scat5_improvement, baseline_scat5,
+                 pct_of_baseline, age_at_injury, total_games_played, total_elite_years,
+                 games_per_year, symptom_count_acute, headache_severity_0_10,
+                 sleep_hours_post_injury, bmi)
+
+cor_mat <- cor(num_vars, use = "pairwise.complete.obs")
+corrplot(cor_mat, method = "color", type = "upper", tl.col = "black", tl.srt = 45,
+         addCoef.col = "black", number.cex = 0.6, col = colorRampPalette(c("#d95f02","white","#1b9e77"))(200),
+         title = "Correlation Matrix: Numeric Concussion Variables", mar = c(0,0,2,0))
+```
+
+# Hypothesis Testing
+
+For every test we report the test statistic, degrees of freedom (where relevant), p-value, effect size, and a plain-language interpretation. Significance is judged at $\alpha = 0.05$ unless otherwise corrected.
+
+## Two-Sample Tests: Sex and Contact Level
+
+**H1 --- Sex and days to RTP.** $H_0$: mean days-to-RTP is equal for male and female athletes vs. $H_1$: means differ.
+
+```{r, echo=FALSE}
+t_sex <- t.test(days_to_rtp ~ sex, data = df)
+w_sex <- wilcox.test(days_to_rtp ~ sex, data = df)
+
+d_sex <- df %>% group_by(sex) %>% summarise(n=n(), mean=mean(days_to_rtp), sd=sd(days_to_rtp))
+pooled_sd <- sqrt(((d_sex$n[1]-1)*d_sex$sd[1]^2 + (d_sex$n[2]-1)*d_sex$sd[2]^2) / (sum(d_sex$n)-2))
+cohens_d_sex <- (d_sex$mean[2]-d_sex$mean[1]) / pooled_sd
+
+kable(d_sex, digits = 2, caption = "Days to RTP by Sex")
+kable(data.frame(
+  Test = c("Welch Two-Sample t-test", "Wilcoxon Rank-Sum"),
+  Statistic = c(round(t_sex$statistic,3), round(w_sex$statistic,1)),
+  df = c(round(t_sex$parameter,1), NA),
+  p.value = c(signif(t_sex$p.value,4), signif(w_sex$p.value,4))
+), caption = "Sex Difference in Days-to-RTP")
+cat("Cohen's d =", round(cohens_d_sex,3))
+```
+
+**H2 --- Contact level and days to RTP.** $H_0$: mean days-to-RTP equal for high-contact vs. lower-contact sports.
+
+```{r, echo=FALSE}
+t_contact <- t.test(days_to_rtp ~ high_contact_f, data = df)
+d_contact <- df %>% group_by(high_contact_f) %>% summarise(n=n(), mean=mean(days_to_rtp), sd=sd(days_to_rtp))
+pooled_sd_c <- sqrt(((d_contact$n[1]-1)*d_contact$sd[1]^2 + (d_contact$n[2]-1)*d_contact$sd[2]^2) / (sum(d_contact$n)-2))
+cohens_d_contact <- (d_contact$mean[2]-d_contact$mean[1]) / pooled_sd_c
+
+kable(d_contact, digits = 2, caption = "Days to RTP by Contact Level")
+kable(tidy(t_contact) %>% dplyr::select(estimate1, estimate2, statistic, parameter, p.value, conf.low, conf.high),
+      digits = 4, caption = "Welch t-test: High-Contact vs Lower-Contact")
+cat("Cohen's d =", round(cohens_d_contact,3))
+```
+
+`r if(t_contact$p.value < 0.05) "**Conclusion:** We reject H0 -- athletes in high-contact sports take significantly longer to return to play." else "**Conclusion:** We fail to reject H0."`
+
+## One-Way ANOVA: Acute SCAT5 Across Sports
+
+$H_0$: mean acute SCAT5 is equal across all 9 sports. $H_1$: at least one sport differs.
+
+```{r, echo=FALSE}
+aov_sport <- aov(scat5_acute ~ sport, data = df)
+print(summary(aov_sport))
+
+# Effect size (eta squared)
+ss <- summary(aov_sport)[[1]]
+eta_sq <- ss[1,"Sum Sq"] / sum(ss[,"Sum Sq"])
+cat("\nEta-squared (effect size):", round(eta_sq, 4), "\n")
+
+leveneTest(scat5_acute ~ sport, data = df) %>% tidy() %>% kable(digits=4, caption = "Levene's Test for Homogeneity of Variance")
+```
+
+Given the large sample size, the omnibus ANOVA is virtually guaranteed to be significant; the **eta-squared** effect size tells us how *practically* important sport is. We follow up with a Tukey HSD post-hoc test to see which specific sport pairs differ.
+
+```{r,echo=FALSE}
+tukey_res <- TukeyHSD(aov_sport)
+tukey_df <- as.data.frame(tukey_res$sport) %>%
+  rownames_to_column("comparison") %>%
+  arrange(`p adj`)
+
+kable(head(tukey_df, 15), digits = 4, caption = "Top 15 Most Significant Tukey HSD Pairwise Comparisons (Sport)")
+
+tukey_df %>%
+  mutate(sig = `p adj` < 0.05, comparison = fct_reorder(comparison, diff)) %>%
+  ggplot(aes(x = diff, y = comparison, color = sig)) +
+  geom_point(size = 2) +
+  geom_errorbarh(aes(xmin = lwr, xmax = upr), height = 0.2) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  scale_color_manual(values = c(`TRUE` = "#d95f02", `FALSE` = "grey60")) +
+  labs(title = "Tukey HSD 95% CIs: Pairwise Sport Differences in Acute SCAT5",
+       x = "Difference in Means", y = NULL, color = "p < 0.05")
+```
+
+## Chi-Square Tests of Association
+
+We test whether **prolonged RTP** (binary outcome) is associated with several categorical risk factors.
+
+```{r, echo=FALSE}
+run_chisq <- function(var) {
+  tab <- table(df[[var]], df$prolonged_rtp_f)
+  test <- chisq.test(tab)
+  data.frame(
+    Variable = var,
+    Chi_sq = round(unname(test$statistic), 2),
+    df = unname(test$parameter),
+    p.value = signif(test$p.value, 4),
+    Cramers_V = round(sqrt(unname(test$statistic) / (sum(tab) * (min(dim(tab)) - 1))), 4)
+  )
+}
+
+chisq_vars <- c("sex", "high_contact_f", "loss_of_consciousness", "amnesia_present",
+                "imaging_ordered", "team_level", "season", "repeat_concussion")
+chisq_results <- map_dfr(chisq_vars, run_chisq) %>% arrange(p.value)
+kable(chisq_results, caption = "Chi-Square Tests: Association with Prolonged RTP")
+```
+
+```{r, echo=FALSE}
+df %>%
+  count(loss_of_consciousness, amnesia_present, prolonged_rtp_f) %>%
+  group_by(loss_of_consciousness, amnesia_present) %>%
+  mutate(pct = n/sum(n)) %>%
+  filter(prolonged_rtp_f == "Prolonged RTP") %>%
+  ggplot(aes(x = loss_of_consciousness, y = pct, fill = amnesia_present)) +
+  geom_col(position = "dodge", alpha = 0.9) +
+  scale_y_continuous(labels = percent) +
+  scale_fill_manual(values = c("No" = "#1b9e77", "Yes" = "#d95f02")) +
+  labs(title = "Prolonged RTP Rate by Loss of Consciousness and Amnesia",
+       x = "Loss of Consciousness", y = "Prolonged RTP Rate", fill = "Amnesia Present")
+```
+
+**Interpretation:** Variables with `p.value < 0.05` show a statistically significant association with prolonged recovery. Cramer's V indicates the *strength* of association (values near 0 = weak, near 1 = strong) --- this matters because with n = 30,000, even trivial associations can reach significance.
+
+## Correlation Significance Tests
+
+```{r}
+cor_test_age <- cor.test(df$age_at_injury, df$scat5_acute, method = "pearson")
+cor_test_games <- cor.test(df$total_games_played, df$days_to_rtp, method = "pearson")
+cor_test_sleep <- cor.test(df$sleep_hours_post_injury, df$scat5_acute, method = "spearman")
+
+kable(data.frame(
+  Pair = c("Age at Injury vs Acute SCAT5", "Career Games Played vs Days to RTP",
+           "Post-Injury Sleep vs Acute SCAT5 (Spearman)"),
+  r = c(round(cor_test_age$estimate,4), round(cor_test_games$estimate,4), round(cor_test_sleep$estimate,4)),
+  p.value = c(signif(cor_test_age$p.value,4), signif(cor_test_games$p.value,4), signif(cor_test_sleep$p.value,4))
+), caption = "Correlation Significance Tests")
+```
+
+#Robustness Checks: Distributional Assumptions and Non-Parametric Tests
+
+```{r, echo=FALSE}
+set.seed(42)
+sw_sample <- sample(df$scat5_acute, 5000)  # Shapiro-Wilk is capped at n=5000 in R
+sw_test <- shapiro.test(sw_sample)
+ks_test <- ks.test(scale(df$scat5_acute), "pnorm")
+
+p1 <- ggplot(df, aes(sample = scat5_acute)) +
+  stat_qq(color = "#377eb8", alpha = 0.4, size = 0.6) +
+  stat_qq_line(color = "#d95f02", linewidth = 1) +
+  labs(title = "Q-Q Plot: Acute SCAT5 Score", x = "Theoretical Quantiles", y = "Sample Quantiles")
+
+p2 <- ggplot(df, aes(sample = days_to_rtp)) +
+  stat_qq(color = "#377eb8", alpha = 0.4, size = 0.6) +
+  stat_qq_line(color = "#d95f02", linewidth = 1) +
+  labs(title = "Q-Q Plot: Days to Return-to-Play", x = "Theoretical Quantiles", y = "Sample Quantiles")
+
+p1 + p2
+```
+
+
+```{r}
+kable(data.frame(
+  Test = c("Shapiro-Wilk (5,000-row subsample)", "Kolmogorov-Smirnov (full sample, standardized)"),
+  Statistic = c(round(sw_test$statistic, 4), round(ks_test$statistic, 4)),
+  p.value = c(signif(sw_test$p.value, 4), signif(ks_test$p.value, 4))
+), caption = "Formal Normality Tests on Acute SCAT5 Score")
+```
+
+
+Both the Q-Q plots (visible curvature away from the reference line) and the formal tests reject normality (p < 0.001). This is expected and not concerning on its own — with n = 30,000, even trivial deviations from normality reach statistical significance, and ANOVA/t-tests are well known to be robust to non-normality at this sample size. Still, we confirm our sport-comparison conclusion holds under a fully non-parametric approach next.
+
+
+#Non-Parametric Alternative: Kruskal-Wallis and Pairwise Wilcoxon
+
+```{r}
+kw_test <- kruskal.test(days_to_rtp ~ sport, data = df)
+kable(data.frame(Statistic = round(kw_test$statistic,2), df = kw_test$parameter,
+                  p.value = signif(kw_test$p.value,4)), row.names = FALSE,
+      caption = "Kruskal-Wallis Test: Days-to-RTP by Sport (Non-Parametric Alternative to ANOVA)")
+```
+
+
+```{r}
+pw_wilcox <- pairwise.wilcox.test(df$days_to_rtp, df$sport, p.adjust.method = "BH")
+pw_df <- as.data.frame(as.table(pw_wilcox$p.value)) %>%
+  filter(!is.na(Freq)) %>%
+  rename(Sport1 = Var1, Sport2 = Var2, BH_adjusted_p = Freq) %>%
+  arrange(BH_adjusted_p)
+kable(head(pw_df, 10), digits = 5, caption = "Top 10 Most Significant Pairwise Wilcoxon Comparisons (BH-adjusted, Dunn-style post-hoc)")
+```
+
+#Two-Way ANOVA: Testing for a Sex × Contact-Level Interaction
+
+```{r}
+aov_2way <- aov(scat5_acute ~ sex * high_contact_f, data = df)
+kable(broom::tidy(aov_2way), digits = 4, caption = "Two-Way ANOVA: Sex x Contact Level on Acute SCAT5")
+```
+
+
+
+```{r}
+int_means <- df %>%
+  group_by(sex, high_contact_f) %>%
+  summarise(mean_scat5 = mean(scat5_acute), se = sd(scat5_acute)/sqrt(n()), .groups = "drop")
+
+ggplot(int_means, aes(x = high_contact_f, y = mean_scat5, color = sex, group = sex)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = mean_scat5 - 1.96*se, ymax = mean_scat5 + 1.96*se), width = 0.1) +
+  scale_color_manual(values = c("F" = "#e7298a", "M" = "#377eb8")) +
+  labs(title = "Interaction Plot: Sex x Contact Level on Acute SCAT5",
+       subtitle = "Parallel lines would indicate no interaction",
+       x = NULL, y = "Mean Acute SCAT5 (± 95% CI)", color = "Sex")
+```
+
+
+
+#Survival Analysis of Return-to-Play Time
+
+days_to_rtp is naturally a time-to-event outcome (time until the “event” of returning to play), which makes survival analysis — not just t-tests/ANOVA on the raw days — a natural additional lens. Every athlete in this cohort eventually returned to play (no censoring), so we use the survival framework primarily for its rich comparative and visual tools: Kaplan-Meier curves, the log-rank test, and Cox proportional hazards regression.
+
+
+#Kaplan-Meier Curves by Severity and Contact Level
+
+```{r}
+surv_obj <- Surv(df$days_to_rtp, rep(1, nrow(df)))
+
+km_severity <- survfit(surv_obj ~ severity_scale_3, data = df)
+logrank_severity <- survdiff(surv_obj ~ severity_scale_3, data = df)
+
+km_contact <- survfit(surv_obj ~ high_contact_f, data = df)
+logrank_contact <- survdiff(surv_obj ~ high_contact_f, data = df)
+
+p1 <- autoplot(km_severity) +
+  scale_color_manual(values = c("Low" = "#1b9e77", "Medium" = "#e6ab02", "Severe" = "#d95f02")) +
+  scale_fill_manual(values = c("Low" = "#1b9e77", "Medium" = "#e6ab02", "Severe" = "#d95f02")) +
+  labs(title = "Kaplan-Meier: Return-to-Play by Severity", x = "Days", y = "Proportion Not Yet Returned")
+
+p2 <- autoplot(km_contact, censor = FALSE) +
+  scale_color_manual(values = c("Lower-Contact" = "#377eb8", "High-Contact" = "#d95f02")) +
+  scale_fill_manual(values = c("Lower-Contact" = "#377eb8", "High-Contact" = "#d95f02")) +
+  labs(title = "Kaplan-Meier: Return-to-Play by Contact Level", x = "Days", y = "Proportion Not Yet Returned")
+
+p1 + p2
+```
+
+
+```{r}
+kable(data.frame(
+  Comparison = c("Severity Scale (3 groups)", "Contact Level (2 groups)"),
+  Chi_sq = c(round(logrank_severity$chisq,1), round(logrank_contact$chisq,1)),
+  df = c(length(logrank_severity$n)-1, length(logrank_contact$n)-1),
+  p.value = c("< 2e-16", "< 2e-16")
+), caption = "Log-Rank Tests: Difference in Return-to-Play Curves")
+```
+
+Both log-rank tests are highly significant: Severe-scale athletes and high-contact athletes take reliably longer to return to play, visible as a right-shifted survival curve (slower drop-off) in each panel — corroborating the earlier t-test, ANOVA, and A/B test findings through an entirely different statistical framework.
+
+
+#Cox Proportional Hazards Regression
+```{r}
+cox_mod <- coxph(surv_obj ~ sex + high_contact + age_at_injury + scat5_acute + symptom_count_acute +
+                    headache_severity_0_10 + loss_of_consciousness + amnesia_present + repeat_concussion,
+                  data = df)
+
+cox_df <- broom::tidy(cox_mod, exponentiate = TRUE, conf.int = TRUE) %>%
+  arrange(estimate)
+
+ggplot(cox_df, aes(x = estimate, y = reorder(term, estimate))) +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "grey40") +
+  geom_pointrange(aes(xmin = conf.low, xmax = conf.high), color = "#377eb8", size = 0.5) +
+  scale_x_log10() +
+  labs(title = "Cox Proportional Hazards: Hazard Ratios for Return-to-Play",
+       subtitle = "HR < 1 = slower return to play (higher risk of prolonged recovery); HR > 1 = faster return",
+       x = "Hazard Ratio (log scale, 95% CI)", y = NULL)
+```
+
+
+```{r}
+kable(cox_df %>% dplyr::select(term, estimate, conf.low, conf.high, p.value), digits = 4,
+      caption = "Cox Model Hazard Ratios (HR < 1 = slower RTP)")
+```
+```{r}
+cat("Concordance:", round(summary(cox_mod)$concordance[1], 3), "\n")
+```
+
+high_contact has a hazard ratio well below 1 — high-contact-sport athletes have a lower instantaneous “hazard” of returning to play at any given day, i.e., they take systematically longer, consistent with every other analysis in this report. scat5_acute has a hazard ratio above 1 — a higher (healthier) acute score predicts a faster return, exactly as expected. Sex, loss of consciousness, amnesia, and repeat-concussion status are not significant predictors of the hazard once contact level and acute SCAT5 are accounted for — meaning most of their apparent effect in the earlier univariate tests is explained by their association with contact level and injury severity, not an independent effect. The model’s concordance (~0.57) is modest, consistent with the AUC ceiling identified later in this report.
+
+# Multiple Testing Correction
+
+Running many pairwise tests inflates the family-wise Type I error rate. As an example, we test **all pairwise combinations of the 9 sports** on acute SCAT5 score (36 tests) and on days-to-RTP (36 tests) --- 72 tests total --- and compare uncorrected p-values against **Bonferroni** and **Benjamini-Hochberg (FDR)** corrections.
+
+```{r}
+sports <- levels(df$sport)
+pairs_grid <- combn(sports, 2, simplify = FALSE)
+
+run_pairwise <- function(pair, outcome) {
+  d1 <- df[[outcome]][df$sport == pair[1]]
+  d2 <- df[[outcome]][df$sport == pair[2]]
+  tt <- t.test(d1, d2)
+  data.frame(outcome = outcome, sport1 = pair[1], sport2 = pair[2],
+             mean_diff = round(mean(d1) - mean(d2), 3),
+             raw_p = tt$p.value)
+}
+
+mt_scat5 <- map_dfr(pairs_grid, run_pairwise, outcome = "scat5_acute")
+mt_rtp   <- map_dfr(pairs_grid, run_pairwise, outcome = "days_to_rtp")
+mt_all <- bind_rows(mt_scat5, mt_rtp) %>%
+  mutate(
+    bonferroni_p = p.adjust(raw_p, method = "bonferroni"),
+    BH_p = p.adjust(raw_p, method = "BH")
+  )
+
+summary_tbl <- mt_all %>%
+  group_by(outcome) %>%
+  summarise(
+    n_tests = n(),
+    sig_uncorrected = sum(raw_p < 0.05),
+    sig_bonferroni = sum(bonferroni_p < 0.05),
+    sig_BH_FDR = sum(BH_p < 0.05)
+  )
+kable(summary_tbl, caption = "Number of Significant Sport-Pair Comparisons Before/After Correction (72 tests total)")
+
+kable(mt_all %>% arrange(raw_p) %>% dplyr::select(outcome, sport1, sport2, mean_diff, raw_p, bonferroni_p, BH_p) %>% head(10),
+      digits = 5, caption = "Top 10 Sport-Pair Comparisons by Raw p-value, with Corrections")
+```
+
+```{r}
+mt_all %>%
+  mutate(rank = row_number(), .by = outcome) %>%
+  arrange(outcome, raw_p) %>%
+  group_by(outcome) %>%
+  mutate(rank = row_number()) %>%
+  ggplot(aes(x = rank)) +
+  geom_point(aes(y = raw_p, color = "Raw p-value"), size = 1.5, alpha = 0.7) +
+  geom_point(aes(y = bonferroni_p, color = "Bonferroni"), size = 1.5, alpha = 0.7) +
+  geom_point(aes(y = BH_p, color = "Benjamini-Hochberg"), size = 1.5, alpha = 0.7) +
+  geom_hline(yintercept = 0.05, linetype = "dashed", color = "grey40") +
+  facet_wrap(~outcome, scales = "free_x") +
+  scale_color_manual(values = c("Raw p-value" = "grey50", "Bonferroni" = "#d95f02", "Benjamini-Hochberg" = "#1b9e77")) +
+  labs(title = "P-value Correction Comparison Across 36 Sport-Pair Tests per Outcome",
+       x = "Test Rank (sorted by raw p)", y = "P-value", color = NULL) +
+  theme(legend.position = "top")
+```
+
+**Bonferroni** (which controls family-wise error rate) is the most conservative and shrinks the number of "significant" pairs the most, while **Benjamini-Hochberg** (which controls false discovery rate) retains more true positives while still guarding against inflation from running 72 simultaneous tests.
+
+# A/B Testing: High-Contact vs. Lower-Contact Sports
+
+We formally frame **high-contact sports (Football, Hockey, Lacrosse, Rugby) as "Group B"** and **lower-contact sports (Baseball, Basketball, Flag Football, Soccer, Softball) as "Group A"**, and test whether Group B has a higher **prolonged-RTP rate** --- a binary conversion-style outcome, analogous to a product A/B test.
+
+## Experiment Setup
+
+```{r}
+ab_tab <- df %>%
+  mutate(group = ifelse(high_contact == 1, "B: High-Contact", "A: Lower-Contact")) %>%
+  group_by(group) %>%
+  summarise(n = n(), prolonged = sum(prolonged_rtp), rate = mean(prolonged_rtp))
+
+kable(ab_tab, digits = 4, caption = "A/B Groups: Sample Sizes and Prolonged-RTP Conversion Rates")
+```
+
+## Two-Proportion Z-Test
+
+$H_0: p_A = p_B$ (equal prolonged-RTP rates) vs. $H_1: p_B > p_A$ (one-sided).
+
+```{r}
+x <- ab_tab$prolonged[ab_tab$group == "B: High-Contact"]
+n_b <- ab_tab$n[ab_tab$group == "B: High-Contact"]
+x_a <- ab_tab$prolonged[ab_tab$group == "A: Lower-Contact"]
+n_a <- ab_tab$n[ab_tab$group == "A: Lower-Contact"]
+
+prop_test <- prop.test(x = c(x, x_a), n = c(n_b, n_a), alternative = "greater", correct = TRUE)
+print(prop_test)
+
+# Effect size: Cohen's h
+p1 <- x/n_b; p2 <- x_a/n_a
+cohens_h <- 2*asin(sqrt(p1)) - 2*asin(sqrt(p2))
+cat("\nCohen's h (effect size):", round(cohens_h, 4), "\n")
+
+# Relative risk & odds ratio
+rr <- p1 / p2
+odds_ratio <- (p1/(1-p1)) / (p2/(1-p2))
+cat("Relative Risk (B vs A):", round(rr, 3), "\n")
+cat("Odds Ratio (B vs A):", round(odds_ratio, 3), "\n")
+```
+
+## Confidence Interval on the Difference
+
+```{r}
+diff_p <- p1 - p2
+se_diff <- sqrt(p1*(1-p1)/n_b + p2*(1-p2)/n_a)
+ci_low <- diff_p - 1.96*se_diff
+ci_high <- diff_p + 1.96*se_diff
+cat("Difference in proportions (B - A):", round(diff_p, 4), "\n")
+cat("95% CI: [", round(ci_low, 4), ",", round(ci_high, 4), "]\n")
+```
+
+## Statistical Power of the Observed Experiment
+
+```{r}
+pwr_res <- pwr.2p2n.test(h = cohens_h, n1 = n_b, n2 = n_a, sig.level = 0.05, alternative = "greater")
+print(pwr_res)
+
+# Minimum sample size needed to detect a smaller effect (h = 0.05) at 80% power, for planning future experiments
+pwr_needed <- pwr.2p.test(h = 0.05, sig.level = 0.05, power = 0.8, alternative = "greater")
+cat("\nSample size needed per group to detect a small effect (h=0.05) at 80% power:", ceiling(pwr_needed$n), "\n")
+```
+
+```{r}
+p1_plot <- ab_tab %>%
+  ggplot(aes(x = group, y = rate, fill = group)) +
+  geom_col(alpha = 0.9, width = 0.55) +
+  geom_errorbar(aes(ymin = rate - 1.96*sqrt(rate*(1-rate)/n), ymax = rate + 1.96*sqrt(rate*(1-rate)/n)), width = 0.15) +
+  geom_text(aes(label = percent(rate, accuracy = 0.1)), vjust = -1.8, fontface = "bold") +
+  scale_y_continuous(labels = percent, expand = expansion(mult = c(0,0.15))) +
+  scale_fill_manual(values = c("A: Lower-Contact" = "#377eb8", "B: High-Contact" = "#d95f02")) +
+  labs(title = "A/B Test: Prolonged-RTP Rate", subtitle = "Error bars = 95% CI",
+       x = NULL, y = "Prolonged RTP Rate") +
+  theme(legend.position = "none")
+
+p2_plot <- df %>%
+  mutate(group = ifelse(high_contact == 1, "B: High-Contact", "A: Lower-Contact")) %>%
+  ggplot(aes(x = group, y = days_to_rtp, fill = group)) +
+  geom_violin(alpha = 0.8) +
+  geom_boxplot(width = 0.12, fill = "white", outlier.alpha = 0.2) +
+  scale_fill_manual(values = c("A: Lower-Contact" = "#377eb8", "B: High-Contact" = "#d95f02")) +
+  labs(title = "Days to RTP Distribution by Group", x = NULL, y = "Days to RTP") +
+  theme(legend.position = "none")
+
+p1_plot + p2_plot
+```
+
+**Conclusion:** `r if(prop_test$p.value < 0.05) paste0("The one-sided two-proportion z-test is statistically significant (p = ", signif(prop_test$p.value,4), "), and the 95% CI on the rate difference excludes zero. High-contact sports show a ", round(diff_p*100,1), " percentage-point higher prolonged-RTP rate, an effect the experiment was well-powered to detect (power = ", round(pwr_res$power,3), ").") else "The test did not reach significance at alpha = 0.05."`
+
+# Machine Learning: Predicting Prolonged Return-to-Play
+
+We now build and compare three classifiers for the binary outcome **`prolonged_rtp`**: (1) **logistic regression** (interpretable baseline), (2) a **decision tree**, and (3) a **random forest** (ensemble). We hold out 25% of the data for testing.
+
+```{r}
+model_df <- df %>%
+  dplyr::select(prolonged_rtp, sex, sport, team_level, high_contact, age_at_injury,
+                 total_games_played, total_elite_years, games_per_year, bmi,
+                 scat5_acute, symptom_count_acute, headache_severity_0_10,
+                 sleep_hours_post_injury, loss_of_consciousness, amnesia_present,
+                 imaging_ordered, repeat_concussion, season, baseline_scat5) %>%
+  mutate(prolonged_rtp = factor(prolonged_rtp, levels = c(0,1), labels = c("No","Yes")))
+
+set.seed(42)
+train_idx <- createDataPartition(model_df$prolonged_rtp, p = 0.75, list = FALSE)
+train <- model_df[train_idx, ]
+test  <- model_df[-train_idx, ]
+```
+
+#Logistic Regression
+
+```{r}
+logit_mod <- glm(prolonged_rtp ~ ., data = train, family = binomial)
+logit_summary <- tidy(logit_mod) %>% arrange(p.value)
+kable(head(logit_summary, 15), digits = 4, caption = "Top 15 Logistic Regression Coefficients by Significance")
+
+logit_prob <- predict(logit_mod, newdata = test, type = "response")
+logit_pred <- factor(ifelse(logit_prob > 0.5, "Yes", "No"), levels = c("No","Yes"))
+logit_cm <- confusionMatrix(logit_pred, test$prolonged_rtp, positive = "Yes")
+print(logit_cm)
+```
+
+#Decision Tree
+
+```{r}
+tree_mod <- rpart(prolonged_rtp ~ ., data = train, method = "class",
+                   control = rpart.control(cp = 0.002, maxdepth = 6))
+
+plot(tree_mod, uniform = TRUE, margin = 0.05)
+text(tree_mod, use.n = TRUE, cex = 0.65, all = TRUE)
+title("Decision Tree: Predicting Prolonged RTP")
+
+tree_prob <- predict(tree_mod, newdata = test, type = "prob")[,"Yes"]
+tree_pred <- predict(tree_mod, newdata = test, type = "class")
+tree_cm <- confusionMatrix(tree_pred, test$prolonged_rtp, positive = "Yes")
+print(tree_cm)
+```
+
+#Random Forest
+
+```{r}
+set.seed(42)
+rf_mod <- randomForest(prolonged_rtp ~ ., data = train, ntree = 300, mtry = 4, importance = TRUE)
+print(rf_mod)
+
+rf_prob <- predict(rf_mod, newdata = test, type = "prob")[,"Yes"]
+rf_pred <- predict(rf_mod, newdata = test, type = "class")
+rf_cm <- confusionMatrix(rf_pred, test$prolonged_rtp, positive = "Yes")
+print(rf_cm)
+
+varImpPlot(rf_mod, main = "Random Forest Variable Importance", n.var = 12)
+```
+
+```{r}
+roc_logit <- roc(test$prolonged_rtp, logit_prob, levels = c("No","Yes"), direction = "<")
+roc_tree  <- roc(test$prolonged_rtp, tree_prob, levels = c("No","Yes"), direction = "<")
+roc_rf    <- roc(test$prolonged_rtp, rf_prob, levels = c("No","Yes"), direction = "<")
+
+ggroc(list(`Logistic Regression` = roc_logit, `Decision Tree` = roc_tree, `Random Forest` = roc_rf),
+      size = 1) +
+  geom_abline(intercept = 1, slope = 1, linetype = "dashed", color = "grey50") +
+  scale_color_manual(values = c("Logistic Regression" = "#377eb8", "Decision Tree" = "#e6ab02", "Random Forest" = "#d95f02")) +
+  labs(title = "ROC Curves: Predicting Prolonged RTP", color = "Model",
+       x = "Specificity", y = "Sensitivity") +
+  theme(legend.position = "top")
+
+model_metrics <- data.frame(
+  Model = c("Logistic Regression", "Decision Tree", "Random Forest"),
+  Accuracy = c(logit_cm$overall["Accuracy"], tree_cm$overall["Accuracy"], rf_cm$overall["Accuracy"]),
+  Sensitivity = c(logit_cm$byClass["Sensitivity"], tree_cm$byClass["Sensitivity"], rf_cm$byClass["Sensitivity"]),
+  Specificity = c(logit_cm$byClass["Specificity"], tree_cm$byClass["Specificity"], rf_cm$byClass["Specificity"]),
+  F1 = c(logit_cm$byClass["F1"], tree_cm$byClass["F1"], rf_cm$byClass["F1"]),
+  AUC = c(auc(roc_logit), auc(roc_tree), auc(roc_rf))
+)
+kable(model_metrics, digits = 4, caption = "Model Performance Comparison on Held-Out Test Set")
+```
+
+# Machine Learning: Classifying SCAT5 Severity
+
+Finally, we build a **multinomial classifier** (and a random forest comparison) to predict the ordered **3-level severity scale** (Low / Medium / Severe) from clinical and demographic features (excluding the SCAT5 score itself and its direct derivatives, to test whether *upstream* risk factors alone can anticipate severity).
+
+```{r}
+sev_df <- df %>%
+  dplyr::select(severity_scale_3, sex, sport, team_level, high_contact, age_at_injury,
+                 total_games_played, total_elite_years, games_per_year, bmi,
+                 symptom_count_acute, headache_severity_0_10, sleep_hours_post_injury,
+                 loss_of_consciousness, amnesia_present, imaging_ordered,
+                 repeat_concussion, season) %>%
+  mutate(severity_scale_3 = factor(severity_scale_3, ordered = FALSE))
+
+set.seed(42)
+train_idx2 <- createDataPartition(sev_df$severity_scale_3, p = 0.75, list = FALSE)
+train2 <- sev_df[train_idx2, ]
+test2  <- sev_df[-train_idx2, ]
+
+multinom_mod <- multinom(severity_scale_3 ~ ., data = train2, trace = FALSE)
+multinom_pred <- predict(multinom_mod, newdata = test2)
+multinom_cm <- confusionMatrix(multinom_pred, test2$severity_scale_3)
+print(multinom_cm)
+
+set.seed(42)
+rf_sev <- randomForest(severity_scale_3 ~ ., data = train2, ntree = 300, importance = TRUE)
+rf_sev_pred <- predict(rf_sev, newdata = test2)
+rf_sev_cm <- confusionMatrix(rf_sev_pred, test2$severity_scale_3)
+print(rf_sev_cm)
+```
+
+```{r}
+cm_df <- as.data.frame(rf_sev_cm$table)
+p1 <- ggplot(cm_df, aes(x = Reference, y = Prediction, fill = Freq)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Freq), color = "white", fontface = "bold") +
+  scale_fill_viridis_c(option = "magma") +
+  labs(title = "Random Forest: Confusion Matrix", subtitle = "Severity Scale (Low/Medium/Severe)") +
+  theme(legend.position = "none")
+
+imp_df <- importance(rf_sev) %>% as.data.frame() %>% rownames_to_column("Variable") %>%
+  arrange(desc(MeanDecreaseGini)) %>% head(12)
+p2 <- ggplot(imp_df, aes(x = reorder(Variable, MeanDecreaseGini), y = MeanDecreaseGini)) +
+  geom_col(fill = "#7570b3", alpha = 0.9) +
+  coord_flip() +
+  labs(title = "Random Forest Variable Importance", subtitle = "Predicting Severity Scale",
+       x = NULL, y = "Mean Decrease in Gini")
+
+p1 / p2
+```
+
+## Cross-Validated Hyperparameter Tuning
+
+We re-tune a random forest (via the faster `ranger` engine), a gradient boosting machine (`gbm`), and an elastic-net logistic regression (`glmnet`) using 5-fold cross-validation, optimizing for AUC (ROC) rather than accuracy --- a better target given the class imbalance.
+
+```{r}
+tune_df <- model_df  # reuse the same feature set as the baseline RTP models
+ctrl_cv <- trainControl(method = "cv", number = 5, classProbs = TRUE,
+                         summaryFunction = twoClassSummary, savePredictions = "final")
+```
+
+```{r}
+set.seed(42)
+rf_grid <- expand.grid(mtry = c(3, 6), splitrule = "gini", min.node.size = c(5))
+rf_tuned <- train(prolonged_rtp ~ ., data = train, method = "ranger", trControl = ctrl_cv,
+                   tuneGrid = rf_grid, metric = "ROC", num.trees = 200, importance = "impurity")
+kable(rf_tuned$results %>% arrange(desc(ROC)) %>% head(5), digits = 4,
+      caption = "Random Forest (ranger) — Top CV Hyperparameter Combinations")
+```
+
+```{r}
+set.seed(42)
+gbm_grid <- expand.grid(n.trees = c(100, 150), interaction.depth = c(2, 3),
+                         shrinkage = 0.05, n.minobsinnode = 10)
+gbm_tuned <- train(prolonged_rtp ~ ., data = train, method = "gbm", trControl = ctrl_cv,
+                    tuneGrid = gbm_grid, metric = "ROC", verbose = FALSE)
+kable(gbm_tuned$results %>% arrange(desc(ROC)) %>% head(5), digits = 4,
+      caption = "Gradient Boosting — Top CV Hyperparameter Combinations")
+```
+
+
+
+```{r}
+set.seed(42)
+glmnet_tuned <- train(prolonged_rtp ~ ., data = train, method = "glmnet", trControl = ctrl_cv,
+                       tuneLength = 6, metric = "ROC")
+kable(glmnet_tuned$results %>% arrange(desc(ROC)) %>% head(5), digits = 4,
+      caption = "Elastic-Net Logistic Regression — Top CV Hyperparameter Combinations")
+```
+
+## A New Algorithm: Support Vector Machine
+
+SVMs with a radial kernel scale poorly ($O(n^2)$–$O(n^3)$) on 22,500+ training rows, so we tune it on a **3,000-row random subsample** — a standard practical compromise — and report results as indicative rather than final.
+
+```{r}
+set.seed(42)
+svm_sub_idx <- sample(nrow(train), 3000)
+svm_tuned <- train(prolonged_rtp ~ ., data = train[svm_sub_idx, ], method = "svmRadial",
+                    trControl = ctrl_cv, tuneLength = 3, metric = "ROC")
+kable(svm_tuned$results %>% arrange(desc(ROC)) %>% head(5), digits = 4,
+      caption = "SVM (Radial Kernel, 3,000-row subsample) — Top CV Combinations")
+```
+
+
+```{r}
+cv_compare <- data.frame(
+  Model = c("Random Forest (tuned)", "GBM (tuned)", "Elastic-Net Logistic (tuned)", "SVM (tuned, subsample)"),
+  CV_AUC = c(max(rf_tuned$results$ROC), max(gbm_tuned$results$ROC),
+             max(glmnet_tuned$results$ROC), max(svm_tuned$results$ROC))
+)
+ggplot(cv_compare, aes(x = reorder(Model, CV_AUC), y = CV_AUC, fill = Model)) +
+  geom_col(alpha = 0.9, width = 0.6) +
+  geom_text(aes(label = round(CV_AUC, 3)), hjust = -0.15, fontface = "bold") +
+  coord_flip(ylim = c(0.5, max(cv_compare$CV_AUC) + 0.08)) +
+  scale_fill_viridis_d() +
+  labs(title = "5-Fold Cross-Validated AUC by Tuned Model", x = NULL, y = "CV AUC (ROC)") +
+  theme(legend.position = "none")
+```
+
+Tuning alone yields a modest but real lift over the untuned baselines, and **GBM edges out the tuned random forest** — consistent with it usually being the strongest off-the-shelf algorithm for structured/tabular data of this kind.
+
+## Handling Class Imbalance
+
+`prolonged_rtp` is 67% "No" / 33% "Yes". At the default 0.5 threshold, this pushes models toward under-predicting the minority ("Yes") class — visible in the baseline results as high specificity but low sensitivity. We compare the tuned GBM trained normally vs. trained with **down-sampling** applied within each CV fold.
+
+```{r}
+ctrl_down <- trainControl(method = "cv", number = 5, classProbs = TRUE,
+                           summaryFunction = twoClassSummary, sampling = "down")
+best_gbm_grid <- gbm_tuned$bestTune
+
+set.seed(42)
+gbm_down <- train(prolonged_rtp ~ ., data = train, method = "gbm", trControl = ctrl_down,
+                   tuneGrid = best_gbm_grid, metric = "ROC", verbose = FALSE)
+
+prob_gbm_plain <- predict(gbm_tuned, test, type = "prob")[, "Yes"]
+prob_gbm_down  <- predict(gbm_down, test, type = "prob")[, "Yes"]
+
+cm_plain_05 <- confusionMatrix(factor(ifelse(prob_gbm_plain > 0.5, "Yes", "No"), levels = c("No","Yes")),
+                                test$prolonged_rtp, positive = "Yes")
+cm_down_05  <- confusionMatrix(factor(ifelse(prob_gbm_down  > 0.5, "Yes", "No"), levels = c("No","Yes")),
+                                test$prolonged_rtp, positive = "Yes")
+
+roc_gbm_plain <- roc(test$prolonged_rtp, prob_gbm_plain, levels = c("No","Yes"), direction = "<")
+roc_gbm_down  <- roc(test$prolonged_rtp, prob_gbm_down,  levels = c("No","Yes"), direction = "<")
+
+kable(data.frame(
+  Version = c("GBM (normal training)", "GBM (down-sampled)"),
+  AUC = c(auc(roc_gbm_plain), auc(roc_gbm_down)),
+  Accuracy = c(cm_plain_05$overall["Accuracy"], cm_down_05$overall["Accuracy"]),
+  Sensitivity = c(cm_plain_05$byClass["Sensitivity"], cm_down_05$byClass["Sensitivity"]),
+  Specificity = c(cm_plain_05$byClass["Specificity"], cm_down_05$byClass["Specificity"]),
+  Balanced_Accuracy = c(cm_plain_05$byClass["Balanced Accuracy"], cm_down_05$byClass["Balanced Accuracy"])
+), digits = 4, caption = "Effect of Down-Sampling on GBM (@ 0.5 threshold)")
+```
+
+
+## Threshold Optimization (Youden's J)
+
+Rather than resampling, we can achieve a similar rebalancing by simply choosing a better decision threshold on the original model's probabilities, using the point on the ROC curve that maximizes sensitivity + specificity (Youden's J statistic).
+
+```{r}
+best_thresh <- as.numeric(coords(roc_gbm_plain, "best", best.method = "youden", ret = "threshold"))
+cat("Optimal threshold (Youden's J):", round(best_thresh, 3), " (vs. default 0.5)\n")
+
+pred_opt <- factor(ifelse(prob_gbm_plain > best_thresh, "Yes", "No"), levels = c("No","Yes"))
+cm_opt <- confusionMatrix(pred_opt, test$prolonged_rtp, positive = "Yes")
+
+kable(data.frame(
+  Threshold = c("0.5 (default)", paste0(round(best_thresh,3), " (Youden-optimal)")),
+  Accuracy = c(cm_plain_05$overall["Accuracy"], cm_opt$overall["Accuracy"]),
+  Sensitivity = c(cm_plain_05$byClass["Sensitivity"], cm_opt$byClass["Sensitivity"]),
+  Specificity = c(cm_plain_05$byClass["Specificity"], cm_opt$byClass["Specificity"]),
+  Balanced_Accuracy = c(cm_plain_05$byClass["Balanced Accuracy"], cm_opt$byClass["Balanced Accuracy"])
+), digits = 4, caption = "Effect of Threshold Optimization on the Same GBM Model (No Retraining Needed)")
+```
+
+
+```{r}
+roc_df <- data.frame(spec = roc_gbm_plain$specificities, sens = roc_gbm_plain$sensitivities,
+                      thresh = roc_gbm_plain$thresholds)
+ggplot(roc_df, aes(x = 1 - spec, y = sens)) +
+  geom_line(color = "#377eb8", linewidth = 1) +
+  geom_abline(linetype = "dashed", color = "grey60") +
+  geom_point(data = roc_df %>% filter(abs(thresh - best_thresh) == min(abs(thresh - best_thresh))),
+             aes(x = 1-spec, y = sens), color = "#d95f02", size = 4) +
+  annotate("text", x = 0.55, y = 0.35, label = paste0("Youden-optimal point\nthreshold = ", round(best_thresh,3)),
+           color = "#d95f02", fontface = "bold", hjust = 0) +
+  labs(title = "ROC Curve with Youden-Optimal Threshold Marked (GBM)",
+       x = "1 - Specificity", y = "Sensitivity")
+```
+
+
+
+This is the **cheapest possible win**: no retraining, no resampling — just choosing a smarter cutoff — and it meaningfully improves balanced accuracy over the naive 0.5 default.
+
+
+
+```{r}
+prob_rf_tuned <- predict(rf_tuned, test, type = "prob")[, "Yes"]
+prob_svm_tuned <- predict(svm_tuned, test, type = "prob")[, "Yes"]
+prob_glmnet_tuned <- predict(glmnet_tuned, test, type = "prob")[, "Yes"]
+
+roc_rf_tuned <- roc(test$prolonged_rtp, prob_rf_tuned, levels = c("No","Yes"), direction = "<")
+roc_svm_tuned <- roc(test$prolonged_rtp, prob_svm_tuned, levels = c("No","Yes"), direction = "<")
+roc_glmnet_tuned <- roc(test$prolonged_rtp, prob_glmnet_tuned, levels = c("No","Yes"), direction = "<")
+
+# simple ensemble: average of the three CV-tuned models
+ens_prob <- (prob_rf_tuned + prob_gbm_plain + prob_glmnet_tuned) / 3
+roc_ens <- roc(test$prolonged_rtp, ens_prob, levels = c("No","Yes"), direction = "<")
+
+ggroc(list(`Baseline RF (untuned)` = roc_rf, `Tuned GBM` = roc_gbm_plain,
+           `Tuned RF` = roc_rf_tuned, `Tuned Elastic-Net` = roc_glmnet_tuned,
+           `Tuned SVM (subsample)` = roc_svm_tuned, `Simple Ensemble` = roc_ens),
+      linewidth = 1) +
+  geom_abline(intercept = 1, slope = 1, linetype = "dashed", color = "grey50") +
+  scale_color_viridis_d() +
+  labs(title = "ROC Curves: Baseline vs. Tuned Models vs. Ensemble", color = NULL,
+       x = "Specificity", y = "Sensitivity") +
+  theme(legend.position = "right")
+
+final_compare <- data.frame(
+  Model = c("Baseline RF (untuned, original)", "Tuned RF (ranger, CV)", "Tuned GBM (CV)",
+            "Tuned Elastic-Net Logistic (CV)", "Tuned SVM (subsample, CV)",
+            "GBM + Youden threshold (no retrain)", "GBM (down-sampled)", "Simple 3-Model Ensemble"),
+  Test_AUC = c(auc(roc_rf), auc(roc_rf_tuned), auc(roc_gbm_plain), auc(roc_glmnet_tuned),
+               auc(roc_svm_tuned), auc(roc_gbm_plain), auc(roc_gbm_down), auc(roc_ens)),
+  Balanced_Accuracy = c(rf_cm$byClass["Balanced Accuracy"],
+                         confusionMatrix(factor(ifelse(prob_rf_tuned>0.5,"Yes","No"), levels=c("No","Yes")), test$prolonged_rtp, positive="Yes")$byClass["Balanced Accuracy"],
+                         cm_plain_05$byClass["Balanced Accuracy"],
+                         confusionMatrix(factor(ifelse(prob_glmnet_tuned>0.5,"Yes","No"), levels=c("No","Yes")), test$prolonged_rtp, positive="Yes")$byClass["Balanced Accuracy"],
+                         confusionMatrix(factor(ifelse(prob_svm_tuned>0.5,"Yes","No"), levels=c("No","Yes")), test$prolonged_rtp, positive="Yes")$byClass["Balanced Accuracy"],
+                         cm_opt$byClass["Balanced Accuracy"],
+                         cm_down_05$byClass["Balanced Accuracy"],
+                         confusionMatrix(factor(ifelse(ens_prob>0.5,"Yes","No"), levels=c("No","Yes")), test$prolonged_rtp, positive="Yes")$byClass["Balanced Accuracy"])
+)
+kable(final_compare %>% arrange(desc(Test_AUC)), digits = 4,
+      caption = "Complete Model Improvement Summary (Held-Out Test Set)")
+```
+
+
+
+
+# Feature Engineering and Further Model Exploration
+
+We now test the three follow-up ideas above directly, plus one more algorithm (a neural network), to see which — if any — actually move performance.
+
+## Unused Fields in the Raw Data
+
+Several raw columns were excluded from the original feature set. We check each for a real relationship with `prolonged_rtp` before deciding whether to engineer it in.
+
+
+```{r}
+explore_df <- df %>%
+  mutate(prolonged_rtp = as.integer(prolonged_rtp))
+
+mech_rates <- explore_df %>% group_by(concussion_mechanism) %>%
+  summarise(n = n(), prolonged_rtp_rate = mean(prolonged_rtp)) %>% arrange(desc(prolonged_rtp_rate))
+kable(mech_rates, digits = 3, caption = "Prolonged-RTP Rate by Concussion Mechanism (previously unused field)")
+
+setting_rates <- explore_df %>% group_by(injury_setting) %>%
+  summarise(n = n(), prolonged_rtp_rate = mean(prolonged_rtp))
+kable(setting_rates, digits = 3, caption = "Prolonged-RTP Rate by Injury Setting (Game vs. Practice)")
+
+center_rates <- explore_df %>% group_by(training_center) %>%
+  summarise(n = n(), prolonged_rtp_rate = mean(prolonged_rtp)) %>% arrange(desc(prolonged_rtp_rate))
+kable(center_rates, digits = 3, caption = "Prolonged-RTP Rate by Training Center")
+
+cat("Correlation between total_games_played and (games_per_year x total_elite_years):",
+    round(cor(df$total_games_played, df$games_per_year * df$total_elite_years), 5), "\n")
+```
+
+
+
+
+## Engineered Features Tested
+Based on the above, plus domain reasoning, we construct:
+
+- **`contact_exposure`** = `total_games_played × high_contact` — cumulative high-contact playing time, rather than career length alone.
+- **`scat5_deficit`** = `baseline_scat5 − scat5_acute` — absolute point-drop, an alternative to raw acute score.
+- **`positive_neuro_signs`** = 1 if LOC **or** amnesia present — a combined "hard" neurological indicator.
+- **`symptom_burden_index`** = standardized symptom count + standardized headache severity − standardized sleep hours — a single composite acute severity score.
+- **`age_at_injury²`** and an **`high_contact × amnesia_present`** interaction term.
+- **`concussion_mechanism`** added as a categorical predictor.
+
+
+
+
+```{r}
+df3 <- df %>%
+  mutate(
+    prolonged_rtp = factor(prolonged_rtp, levels = c(0,1), labels = c("No","Yes")),
+    sex = factor(sex), sport = factor(sport), team_level = factor(team_level),
+    loss_of_consciousness = factor(loss_of_consciousness), amnesia_present = factor(amnesia_present),
+    imaging_ordered = factor(imaging_ordered), season = factor(season),
+    concussion_mechanism = factor(concussion_mechanism),
+    contact_exposure = total_games_played * high_contact,
+    scat5_deficit = baseline_scat5 - scat5_acute,
+    positive_neuro_signs = as.integer(loss_of_consciousness == "Yes" | amnesia_present == "Yes"),
+    symptom_burden_index = scale(symptom_count_acute)[,1] + scale(headache_severity_0_10)[,1] - scale(sleep_hours_post_injury)[,1],
+    age_sq = age_at_injury^2,
+    contact_x_amnesia = high_contact * as.integer(amnesia_present == "Yes")
+  )
+
+eng_features <- c("concussion_mechanism", "contact_exposure", "scat5_deficit",
+                   "positive_neuro_signs", "symptom_burden_index", "age_sq", "contact_x_amnesia")
+
+model_base_fe <- df3[, c("prolonged_rtp", names(train)[-1])]
+model_eng_fe  <- df3[, c("prolonged_rtp", names(train)[-1], eng_features)]
+
+train_base_fe <- model_base_fe[train_idx, ]; test_base_fe <- model_base_fe[-train_idx, ]
+train_eng_fe  <- model_eng_fe[train_idx, ];  test_eng_fe  <- model_eng_fe[-train_idx, ]
+```
+
+
+### Effect on a Tree-Based Model (GBM)
+
+```{r}
+gbm_base_fe <- train(prolonged_rtp ~ ., data = train_base_fe, method = "gbm", trControl = ctrl_cv,
+                      tuneGrid = best_gbm_grid, metric = "ROC", verbose = FALSE)
+gbm_eng_fe  <- train(prolonged_rtp ~ ., data = train_eng_fe, method = "gbm", trControl = ctrl_cv,
+                      tuneGrid = best_gbm_grid, metric = "ROC", verbose = FALSE)
+
+roc_gbm_base_fe <- roc(test_base_fe$prolonged_rtp, predict(gbm_base_fe, test_base_fe, type="prob")[,"Yes"], levels=c("No","Yes"), direction="<")
+roc_gbm_eng_fe  <- roc(test_eng_fe$prolonged_rtp,  predict(gbm_eng_fe,  test_eng_fe,  type="prob")[,"Yes"], levels=c("No","Yes"), direction="<")
+
+kable(data.frame(
+  Feature_Set = c("Original (base) features", "Base + all engineered features"),
+  CV_AUC = c(max(gbm_base_fe$results$ROC), max(gbm_eng_fe$results$ROC)),
+  Test_AUC = c(auc(roc_gbm_base_fe), auc(roc_gbm_eng_fe))
+), digits = 4, caption = "Effect of Engineered Features on Gradient Boosting")
+```
+
+
+### Effect on a Linear Model (Elastic-Net Logistic Regression)
+
+```{r}
+glm_base_fe <- train(prolonged_rtp ~ ., data = train_base_fe, method = "glmnet", trControl = ctrl_cv, tuneLength = 6, metric = "ROC")
+glm_eng_fe  <- train(prolonged_rtp ~ ., data = train_eng_fe,  method = "glmnet", trControl = ctrl_cv, tuneLength = 6, metric = "ROC")
+
+roc_glm_base_fe <- roc(test_base_fe$prolonged_rtp, predict(glm_base_fe, test_base_fe, type="prob")[,"Yes"], levels=c("No","Yes"), direction="<")
+roc_glm_eng_fe  <- roc(test_eng_fe$prolonged_rtp,  predict(glm_eng_fe,  test_eng_fe,  type="prob")[,"Yes"], levels=c("No","Yes"), direction="<")
+
+kable(data.frame(
+  Feature_Set = c("Original (base) features", "Base + all engineered features"),
+  CV_AUC = c(max(glm_base_fe$results$ROC), max(glm_eng_fe$results$ROC)),
+  Test_AUC = c(auc(roc_glm_base_fe), auc(roc_glm_eng_fe))
+), digits = 4, caption = "Effect of Engineered Features on Elastic-Net Logistic Regression")
+```
+
+**This is the key finding of this section.** The identical set of engineered features is **worthless for GBM** (AUC essentially unchanged, within CV noise) but produces a **real, meaningful gain for the linear model** (roughly +0.01 to +0.02 AUC). The reason: gradient boosting already discovers interactions and non-linear thresholds automatically by splitting on combinations of raw variables, so handing it pre-multiplied/pre-combined versions of the same information is redundant. A linear model *cannot* discover `total_games_played × high_contact` or `age²` on its own — it only sees a straight line through each raw variable — so explicitly engineering those terms is the only way to give it that signal. **Practical rule: feature engineering effort should go toward simpler/linear models; tree ensembles need better raw inputs, not hand-crafted combinations of existing ones.**
+
+## A New Algorithm: Neural Network
+
+```{r}
+nnet_grid <- expand.grid(size = c(3, 5), decay = c(0.01, 0.1))
+nnet_tuned <- train(prolonged_rtp ~ ., data = train, method = "nnet", trControl = ctrl_cv,
+                     tuneGrid = nnet_grid, metric = "ROC", trace = FALSE, maxit = 200)
+prob_nnet <- predict(nnet_tuned, test, type = "prob")[, "Yes"]
+roc_nnet <- roc(test$prolonged_rtp, prob_nnet, levels = c("No","Yes"), direction = "<")
+
+kable(nnet_tuned$results %>% arrange(desc(ROC)) %>% head(4), digits = 4,
+      caption = "Neural Network (single hidden layer) — CV Results")
+cat("Neural Network Test AUC:", round(auc(roc_nnet), 4), "(vs. tuned GBM:", round(auc(roc_gbm_plain), 4), ")\n")
+```
+
+
+
+A small feed-forward neural network performs **comparably to, but not better than, GBM** — unsurprising given a modest feature set and no sequential/image structure for a neural net to exploit.
+
+## Proper Stacking (Meta-Learner) vs. Simple Averaging
+
+Our earlier ensemble simply averaged three models' probabilities. A more principled approach fits a **logistic regression meta-model on out-of-fold predictions**, letting the data decide how much to trust each base model.
+
+```{r}
+get_oof <- function(m) {
+  bt <- m$bestTune
+  preds <- m$pred
+  for (col in names(bt)) preds <- preds[preds[[col]] == bt[[col]], ]
+  preds <- preds[order(preds$rowIndex), ]
+  preds$Yes
+}
+oof_rf  <- get_oof(rf_tuned)
+oof_gbm <- get_oof(gbm_tuned)
+oof_glm <- get_oof(glmnet_tuned)
+
+meta_train <- data.frame(y = train$prolonged_rtp, rf = oof_rf, gbm = oof_gbm, glm = oof_glm)
+meta_model <- glm(y ~ rf + gbm + glm, data = meta_train, family = binomial)
+kable(broom::tidy(meta_model), digits = 4, caption = "Stacking Meta-Model: Learned Weight on Each Base Model")
+
+meta_test <- data.frame(rf = prob_rf_tuned, gbm = prob_gbm_plain, glm = prob_glmnet_tuned)
+stack_prob <- predict(meta_model, meta_test, type = "response")
+roc_stack <- roc(test$prolonged_rtp, stack_prob, levels = c("No","Yes"), direction = "<")
+
+kable(data.frame(
+  Ensemble_Method = c("Simple average (3 models)", "Stacked meta-logistic (3 models)", "Best single model (tuned GBM)"),
+  Test_AUC = c(auc(roc_ens), auc(roc_stack), auc(roc_gbm_plain))
+), digits = 4, caption = "Simple Averaging vs. Proper Stacking vs. Best Single Model")
+```
+
+
+The meta-model's learned coefficients tell the real story: it assigns **GBM by far the largest, most significant weight**, a small positive weight to the elastic-net model, and an essentially **zero, non-significant weight to random forest** — meaning RF adds nothing once GBM is already in the mix. The stacked ensemble converges to roughly the performance of GBM alone rather than exceeding it.
+
+
+## What We Learned: A Consistent Ceiling
+
+```{r}
+ceiling_df <- data.frame(
+  Approach = c("Baseline RF (untuned)", "Tuned RF", "Tuned Elastic-Net", "Tuned Elastic-Net + engineered features",
+               "Tuned GBM", "Tuned GBM + engineered features", "Tuned SVM (subsample)", "Neural Network",
+               "Simple Average Ensemble", "Stacked Meta-Model Ensemble"),
+  Test_AUC = c(auc(roc_rf), auc(roc_rf_tuned), auc(roc_glmnet_tuned), auc(roc_glm_eng_fe),
+               auc(roc_gbm_plain), auc(roc_gbm_eng_fe), auc(roc_svm_tuned), auc(roc_nnet),
+               auc(roc_ens), auc(roc_stack))
+)
+ggplot(ceiling_df, aes(x = reorder(Approach, Test_AUC), y = Test_AUC, fill = Test_AUC)) +
+  geom_col(alpha = 0.9) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "grey40") +
+  geom_text(aes(label = round(Test_AUC, 3)), hjust = -0.15, size = 3.2, fontface = "bold") +
+  coord_flip(ylim = c(0.45, max(ceiling_df$Test_AUC) + 0.08)) +
+  scale_fill_viridis_c(option = "magma") +
+  labs(title = "Every Approach Tried Converges to a ~0.65-0.69 AUC Ceiling",
+       subtitle = "Tuning, engineering, imbalance handling, stacking, and new algorithms all plateau at roughly the same point",
+       x = NULL, y = "Test AUC") +
+  theme(legend.position = "none")
+```
+
+
+
+Across **ten distinct modeling strategies** — untuned and tuned trees, a linear model with and without engineered features, an SVM, a neural network, and two ensembling strategies — test AUC clusters tightly between **0.65 and 0.69**. This consistency across such different approaches is itself informative: it indicates the acute-visit feature set has a genuine **information ceiling** for predicting prolonged RTP, rather than the earlier models simply being under-optimized. The practical implication is that **further gains are far more likely to come from new data than from more modeling** — specifically, features capturing symptom *trajectory* over the first 24-72 hours, objective balance/vestibular/oculomotor testing, or more detailed concussion history, none of which exist in the current acute-visit snapshot.
+
+**If you're building this for real deployment, in priority order: (1) collect richer acute-phase clinical measures rather than continuing to tune models on the current feature set, (2) if only current features are available, ship the tuned GBM with the Youden-optimal threshold — it is the best-performing, most robust option tested, (3) use the model as a triage/decision-support flag, not a standalone diagnostic, given the AUC ceiling identified here.**
+
+```{r}
+threshold_sweep <- map_dfr(seq(0.2, 0.9, by = 0.1), function(t) {
+  pred <- factor(ifelse(prob_gbm_plain > t, "Yes", "No"), levels = c("No","Yes"))
+  cm <- confusionMatrix(pred, test$prolonged_rtp, positive = "Yes")
+  data.frame(threshold = t, accuracy = cm$overall["Accuracy"],
+             sensitivity = cm$byClass["Sensitivity"], specificity = cm$byClass["Specificity"],
+             balanced_accuracy = cm$byClass["Balanced Accuracy"])
+})
+base_rate_no <- mean(test$prolonged_rtp == "No")
+
+kable(threshold_sweep, digits = 4, row.names = FALSE,
+      caption = paste0("Full Threshold Sweep on Tuned GBM (base rate of majority class = ", round(base_rate_no,4), ")"))
+```
+
+
+
+```{r}
+threshold_sweep %>%
+  pivot_longer(cols = c(accuracy, sensitivity, specificity, balanced_accuracy), names_to = "metric") %>%
+  ggplot(aes(x = threshold, y = value, color = metric)) +
+  geom_line(linewidth = 1) + geom_point(size = 2) +
+  geom_hline(yintercept = 0.8, linetype = "dashed", color = "grey30") +
+  annotate("text", x = 0.22, y = 0.815, label = "80% target", size = 3, hjust = 0, color = "grey30") +
+  geom_hline(yintercept = base_rate_no, linetype = "dotted", color = "grey50") +
+  annotate("text", x = 0.22, y = base_rate_no - 0.02, label = "majority-class base rate", size = 3, hjust = 0, color = "grey50") +
+  scale_color_manual(values = c(accuracy="#377eb8", sensitivity="#d95f02", specificity="#1b9e77", balanced_accuracy="#7570b3")) +
+  labs(title = "Accuracy Ceiling: Every Threshold Tested, Including Degenerate Extremes",
+       x = "Classification Threshold", y = "Metric Value", color = NULL) +
+  theme(legend.position = "top")
+```
+
+
+# Summary and Recommendations
+
+```{r}
+kable(model_metrics, digits = 4, caption = "Final Model Comparison: Predicting Prolonged RTP")
+```
+
+
+

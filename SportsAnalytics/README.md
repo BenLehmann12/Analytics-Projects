@@ -131,3 +131,8 @@ Add your data source here (e.g., Basketball-Reference) and respect its terms of 
 ## License
 
 Add a license of your choice (e.g., MIT).
+
+## Example
+https://github.com/user-attachments/assets/66acdd47-cfbc-4b29-87a3-9b6947c73b52
+
+
